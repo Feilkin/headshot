@@ -1,0 +1,31 @@
+[package]
+name = "headshot-server"
+description = "Headless VGGT-Omega inference server: WGSL/wgpu engine, safetensors weights, session protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+clap.workspace = true
+half.workspace = true
+headshot-shared.workspace = true
+memmap2 = "0.9.11"
+safetensors = "0.8.0"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11.0"
+thiserror.workspace = true
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wgpu.workspace = true
+
+[build-dependencies]
+wesl = "0.4.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"

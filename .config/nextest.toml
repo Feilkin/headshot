@@ -1,0 +1,12 @@
+# cargo-nextest configuration — https://nexte.st/docs/configuration/
+#
+# Parity tests (doc/02 §5) are #[ignore]d because they need locally generated,
+# never-committed fixtures (converted weights + reference activation dumps).
+# Run them with `just parity`.
+
+[profile.default]
+slow-timeout = { period = "120s", terminate-after = 3 }
+
+[profile.ci]
+fail-fast = false
+failure-output = "immediate-final"

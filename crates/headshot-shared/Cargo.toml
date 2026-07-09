@@ -1,0 +1,15 @@
+[package]
+name = "headshot-shared"
+description = "Protocol messages, model constants, and pose/camera math shared by the headshot client and server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+half.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "headshot-client"
+description = "bevy client: capture preprocessing, keyframe selection, progressive point-cloud visualization, export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+# No `audio`: the viewer is silent and bevy_audio's cpal/alsa-sys needs
+# system ALSA dev libs we don't want to depend on.
+bevy = { version = "0.19", default-features = false, features = ["3d", "ui"] }
+bytemuck.workspace = true
+clap.workspace = true
+crossbeam-channel = "0.5.16"
+half.workspace = true
+headshot-shared.workspace = true
+image = "0.25.10"

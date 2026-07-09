@@ -1,0 +1,19 @@
+/target
+
+# FAIR-licensed reference implementation and Meta's paper source: consulted
+# locally, must never enter the repo (doc/README.md licensing note).
+/doc/code/
+/doc/arXiv-2605.15195v1/
+
+# Weights and parity fixtures are derived from the FAIR-licensed checkpoint
+# and must never be committed in any form (doc/README.md licensing note).
+# /models/ also holds Meta's README, which must not be bundled either.
+/fixtures/
+/models/
+*.safetensors
+*.pt
+manifest.json
+
+# Python tooling (tools/convert_weights.py, tools/dump_reference.py)
+.venv/
+__pycache__/

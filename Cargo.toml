@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/headshot-shared",
+    "crates/headshot-server",
+    "crates/headshot-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+repository = "https://github.com/bilberry-games/headshot"
+
+[workspace.dependencies]
+headshot-shared = { path = "crates/headshot-shared" }
+
+# Keep wgpu on the same major as bevy 0.19 (which pins wgpu 29.0.x) so the
+# workspace resolves to a single wgpu.
+wgpu = "29"
+
+anyhow = "1"
+thiserror = "2"
+bytemuck = { version = "1", features = ["derive"] }
+half = { version = "2", features = ["bytemuck"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+
+# Fast/faster in dev: the model math is unusable unoptimized, and bevy
+# recommends optimized deps even in debug builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
