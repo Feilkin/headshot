@@ -22,14 +22,14 @@ fn trunk_wallclock() {
         let dino = Dino::load(&ctx, &weights, precision).unwrap();
         let trunk = Trunk::load(&ctx, &weights, precision).unwrap();
         // warm-up (pipeline compilation, allocator)
-        let tokens = dino.forward(&ctx, &images, None);
-        let _ = trunk.forward(&ctx, &tokens, n, height / 16, width / 16, None);
+        let tokens = dino.forward(&ctx, &images, None).unwrap();
+        let _ = trunk.forward(&ctx, &tokens, n, height / 16, width / 16, None).unwrap();
         ctx.sync();
 
         let start = std::time::Instant::now();
-        let tokens = dino.forward(&ctx, &images, None);
+        let tokens = dino.forward(&ctx, &images, None).unwrap();
         let dino_done = std::time::Instant::now();
-        let caches = trunk.forward(&ctx, &tokens, n, height / 16, width / 16, None);
+        let caches = trunk.forward(&ctx, &tokens, n, height / 16, width / 16, None).unwrap();
         ctx.sync();
         drop(caches);
         let end = std::time::Instant::now();

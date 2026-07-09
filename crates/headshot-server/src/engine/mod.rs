@@ -89,11 +89,21 @@ pub struct GpuContext {
     pipelines: HashMap<&'static str, wgpu::ComputePipeline>,
     encoder: Mutex<Option<wgpu::CommandEncoder>>,
     in_flight: Mutex<std::collections::VecDeque<wgpu::SubmissionIndex>>,
+    /// Cooperative cancellation (doc/03 §7): model forwards check this
+    /// between blocks and bail with [`Cancelled`]. Set from any thread via
+    /// [`GpuContext::request_cancel`]; reset at session start.
+    cancel: std::sync::atomic::AtomicBool,
     /// shader-f16 available: the f16 kernel variants exist.
     pub f16_supported: bool,
     /// 16x16x16 f16→f32 cooperative matrix available: `linear_wmma` exists.
     pub wmma_supported: bool,
 }
+
+/// Marker error for cooperative cancellation; detect with
+/// `err.is::<Cancelled>()` on the anyhow chain.
+#[derive(Debug, thiserror::Error)]
+#[error("cancelled")]
+pub struct Cancelled;
 
 impl GpuContext {
     /// Create a context on the first available adapter. `Err` when no
@@ -194,6 +204,7 @@ impl GpuContext {
             pipelines,
             encoder: Mutex::new(None),
             in_flight: Mutex::new(std::collections::VecDeque::new()),
+            cancel: std::sync::atomic::AtomicBool::new(false),
             f16_supported,
             wmma_supported,
         })
@@ -272,6 +283,26 @@ impl GpuContext {
         }
     }
 
+    /// Request cooperative cancellation of the in-progress forward passes
+    /// (safe from any thread).
+    pub fn request_cancel(&self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Clear the cancel flag (call at session start).
+    pub fn reset_cancel(&self) {
+        self.cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// `Err(Cancelled)` when cancellation was requested; model forwards
+    /// call this between blocks.
+    pub fn check_cancelled(&self) -> Result<()> {
+        if self.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            anyhow::bail!(Cancelled);
+        }
+        Ok(())
+    }
+
     /// Flush and block until the GPU is idle.
     pub fn sync(&self) {
         self.flush();
@@ -314,7 +345,7 @@ pub fn grid_2d(total: u64, wg: u64) -> [u32; 3] {
 }
 
 /// Minimal blocking executor for wgpu's native (immediately-ready) futures.
-pub(crate) fn pollster_block<F: Future>(future: F) -> F::Output {
+pub fn pollster_block<F: Future>(future: F) -> F::Output {
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
     fn noop_raw_waker() -> RawWaker {

@@ -35,7 +35,7 @@ fn trunk_memory_trace() {
     let trunk = Trunk::load(&ctx, &weights, Dtype::F16).unwrap();
     println!("weights loaded: {:.1} GiB", gtt_gib());
 
-    let tokens = dino.forward(&ctx, &images, None);
+    let tokens = dino.forward(&ctx, &images, None).unwrap();
     ctx.sync();
     println!("after dino sync: {:.1} GiB", gtt_gib());
 
@@ -50,7 +50,7 @@ fn trunk_memory_trace() {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     });
-    let caches = trunk.forward(&ctx, &tokens, n, h / 16, w / 16, None);
+    let caches = trunk.forward(&ctx, &tokens, n, h / 16, w / 16, None).unwrap();
     ctx.sync();
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     sampler.join().unwrap();
@@ -95,15 +95,15 @@ fn full_pipeline_phase_peaks() {
     std::thread::sleep(std::time::Duration::from_millis(200));
     phase("load");
 
-    let tokens = dino.forward(&ctx, &images, None);
+    let tokens = dino.forward(&ctx, &images, None).unwrap();
     ctx.sync();
     phase("dino");
-    let caches = trunk.forward(&ctx, &tokens, n, h / 16, w / 16, None);
+    let caches = trunk.forward(&ctx, &tokens, n, h / 16, w / 16, None).unwrap();
     ctx.sync();
     phase("trunk");
     let _pose = camera.forward(&ctx, &caches[3], n, None);
     phase("camera");
-    let _out = dense.forward(&ctx, &caches, n, h / 16, w / 16, None);
+    let _out = dense.forward(&ctx, &caches, n, h / 16, w / 16, None, None).unwrap();
     ctx.sync();
     phase("dense");
 }
@@ -129,7 +129,7 @@ fn dino_window_experiment() {
     });
 
     let t = std::time::Instant::now();
-    let tokens = dino.forward(&ctx, &images, None);
+    let tokens = dino.forward(&ctx, &images, None).unwrap();
     ctx.sync();
     drop(tokens);
     println!(

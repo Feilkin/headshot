@@ -119,10 +119,10 @@ fn main() -> Result<()> {
     let images = ctx.tensor_from_slice(&[n, 3, height, width], &images);
     let peak = spawn_gpu_memory_sampler();
     let t0 = std::time::Instant::now();
-    let tokens = dino.forward(&ctx, &images, None);
-    let caches = trunk.forward(&ctx, &tokens, n, h_p, w_p, None);
+    let tokens = dino.forward(&ctx, &images, None)?;
+    let caches = trunk.forward(&ctx, &tokens, n, h_p, w_p, None)?;
     let pose_enc = camera_head.forward(&ctx, &caches[3], n, None);
-    let dense = dense_head.forward(&ctx, &caches, n, h_p, w_p, None);
+    let dense = dense_head.forward(&ctx, &caches, n, h_p, w_p, None, None)?;
     ctx.sync();
     tracing::info!("inference: {:.1?}", t0.elapsed());
     if let Some(peak) = peak {

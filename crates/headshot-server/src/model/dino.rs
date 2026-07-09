@@ -60,12 +60,13 @@ impl Dino {
 
     /// images (N, 3, H, W) f32 in [0,1] → patch tokens (N·P, 1024).
     /// `tap` observes "dino.patch_embed" (N·P, 1024) and "dino.tokens".
+    /// Bails with [`crate::engine::Cancelled`] between blocks on request.
     pub fn forward(
         &self,
         ctx: &GpuContext,
         images: &GpuTensor,
         mut tap: Option<Tap<'_>>,
-    ) -> GpuTensor {
+    ) -> Result<GpuTensor> {
         let [n, _, height, width] = images.shape[..] else { panic!("images (N,3,H,W)") };
         let (h_p, w_p) = (height / 16, width / 16);
         let p = h_p * w_p;
@@ -96,6 +97,7 @@ impl Dino {
         let cos = ctx.tensor_from_slice(&[p, 64], &cos);
 
         for (i, block) in self.blocks.iter().enumerate() {
+            ctx.check_cancelled()?;
             x = block.forward(ctx, &x, n, t, Some(Rope { sin: &sin, cos: &cos, prefix: PREFIX }));
             if let Some(tap) = tap.as_deref_mut() {
                 tap(&format!("dino.block.{i:02}"), &x);
@@ -113,6 +115,6 @@ impl Dino {
             tap("dino.tokens", &out);
         }
         ctx.flush();
-        out
+        Ok(out)
     }
 }

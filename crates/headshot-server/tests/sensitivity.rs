@@ -29,11 +29,11 @@ fn trunk_noise_amplification() {
         let mut tap = |name: &str, t: &headshot_server::engine::tensor::GpuTensor| {
             outs.insert(name.to_string(), ctx.download(t));
         };
-        let tokens = dino.forward(&ctx, &g, Some(&mut tap));
+        let tokens = dino.forward(&ctx, &g, Some(&mut tap)).unwrap();
         let mut tap = |name: &str, t: &headshot_server::engine::tensor::GpuTensor| {
             outs.insert(name.to_string(), ctx.download(t));
         };
-        trunk.forward(&ctx, &tokens, n, height / 16, width / 16, Some(&mut tap));
+        trunk.forward(&ctx, &tokens, n, height / 16, width / 16, Some(&mut tap)).unwrap();
         outs
     };
 

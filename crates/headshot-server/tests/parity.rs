@@ -132,13 +132,14 @@ fn trunk_parity(scene: &str, precision: Dtype) {
         let gate = if name.starts_with("dino.patch_embed") { shallow_gate } else { deep_gate };
         check(name, ctx.download(t), gate);
     };
-    let tokens = dino.forward(&ctx, &images, Some(&mut tap));
+    let tokens = dino.forward(&ctx, &images, Some(&mut tap)).expect("dino forward");
 
     let trunk = Trunk::load(&ctx, &weights, precision).expect("trunk load");
     let mut tap = |name: &str, t: &headshot_server::engine::tensor::GpuTensor| {
         check(name, ctx.download(t), deep_gate);
     };
-    let caches = trunk.forward(&ctx, &tokens, n, h_p, w_p, Some(&mut tap));
+    let caches =
+        trunk.forward(&ctx, &tokens, n, h_p, w_p, Some(&mut tap)).expect("trunk forward");
     assert_eq!(caches.len(), 4);
 
     // Camera head (all f32; doc/01 §4.1). pose_enc gate: abs < 1e-3 per
@@ -173,7 +174,7 @@ fn trunk_parity(scene: &str, precision: Dtype) {
     // Dense head end to end (our caches). Depth carries the trunk drift;
     // gate on cosine like the trunk layers, self-calibrated for f16.
     let dense = DenseHead::load(&ctx, &weights).expect("dense head load");
-    let out = dense.forward(&ctx, &caches, n, h_p, w_p, None);
+    let out = dense.forward(&ctx, &caches, n, h_p, w_p, None, None).expect("dense forward");
     let (_, depth_ref) = dump.tensor("depth").unwrap();
     let m = compare(&out.depth, &depth_ref);
     let mut depth_gate = deep_gate;
@@ -271,7 +272,8 @@ fn heads_isolated(scene: &str) {
             fused_ours.extend(ctx.download(t));
         }
     };
-    let out = dense.forward(&ctx, &caches, n, h_p, w_p, Some(&mut tap));
+    let out =
+        dense.forward(&ctx, &caches, n, h_p, w_p, Some(&mut tap), None).expect("dense forward");
 
     let (fshape, fused_ref) = dump.tensor("dense.fused").unwrap();
     let [fn_, fc, fh, fw] = fshape[..] else { panic!("fused shape") };

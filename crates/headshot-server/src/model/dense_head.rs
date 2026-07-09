@@ -49,6 +49,10 @@ struct Refinenet {
     out_conv_b: GpuTensor,
 }
 
+/// Per-chunk observer: `(first_frame, n_frames, depth, conf)` — the
+/// streaming unit of doc/04.
+pub type OnChunk<'a> = &'a mut dyn FnMut(usize, usize, &[f32], &[f32]);
+
 /// The per-frame outputs of one forward pass.
 pub struct DenseOutput {
     /// (N, H, W) row-major, depth > 0.
@@ -164,6 +168,9 @@ impl DenseHead {
     /// 23). Returns depth/conf at full input resolution (H = 16·h_p).
     ///
     /// `tap` observes "dense.fused" (n, h4, w4, 256) NHWC per chunk.
+    /// [`OnChunk`] fires as each independent 8-frame chunk finishes.
+    /// Bails with [`crate::engine::Cancelled`] between chunks on request.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
         ctx: &GpuContext,
@@ -172,7 +179,8 @@ impl DenseHead {
         h_p: usize,
         w_p: usize,
         mut tap: Option<Tap<'_>>,
-    ) -> DenseOutput {
+        mut on_chunk: Option<OnChunk<'_>>,
+    ) -> Result<DenseOutput> {
         assert_eq!(caches.len(), 4);
         let p = h_p * w_p;
         let t = p + PREFIX;
@@ -193,6 +201,7 @@ impl DenseHead {
         let mut conf = Vec::with_capacity(n * height * width);
 
         for chunk0 in (0..n).step_by(CHUNK) {
+            ctx.check_cancelled()?;
             let nc = CHUNK.min(n - chunk0);
 
             // per level: patch tokens → LN → 1×1 conv → +UV → resize
@@ -255,10 +264,19 @@ impl DenseHead {
                 let activated = ctx.unary(&full, op);
                 sink.extend(ctx.download(&activated));
             }
+            if let Some(on_chunk) = on_chunk.as_deref_mut() {
+                let px = height * width;
+                on_chunk(
+                    chunk0,
+                    nc,
+                    &depth[chunk0 * px..][..nc * px],
+                    &conf[chunk0 * px..][..nc * px],
+                );
+            }
             ctx.flush();
         }
 
-        DenseOutput { depth, conf }
+        Ok(DenseOutput { depth, conf })
     }
 
     /// One fusion block RNk (doc/01 §4.2 step 3), 0-based `idx` for

@@ -50,6 +50,7 @@ impl Trunk {
     /// `tap` observes "trunk.frame.NN" (N·T, 1024), "trunk.inter.NN"
     /// (N·T or N·17 rows — register layers carry only the gathered prefix
     /// tokens, matching the reference hook shapes) and "cache.NN".
+    /// Bails with [`crate::engine::Cancelled`] between blocks on request.
     pub fn forward(
         &self,
         ctx: &GpuContext,
@@ -58,7 +59,7 @@ impl Trunk {
         h_p: usize,
         w_p: usize,
         mut tap: Option<Tap<'_>>,
-    ) -> Vec<GpuTensor> {
+    ) -> Result<Vec<GpuTensor>> {
         let p = h_p * w_p;
         assert_eq!(dino_tokens.len(), n * p * DIM);
         // DINO always emits f32 (massive activations; see Dino::load) —
@@ -88,6 +89,7 @@ impl Trunk {
 
         let mut caches = Vec::new();
         for k in 0..24 {
+            ctx.check_cancelled()?;
             let frame_out = self.frame_blocks[k].forward(
                 ctx,
                 &x,
@@ -141,6 +143,6 @@ impl Trunk {
             }
             ctx.flush();
         }
-        caches
+        Ok(caches)
     }
 }

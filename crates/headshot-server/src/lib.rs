@@ -8,4 +8,5 @@
 pub mod engine;
 pub mod model;
 pub mod parity;
+pub mod server;
 pub mod weights;
