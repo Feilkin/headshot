@@ -117,6 +117,7 @@ fn main() -> Result<()> {
 
     let (h_p, w_p) = (height / 16, width / 16);
     let images = ctx.tensor_from_slice(&[n, 3, height, width], &images);
+    let peak = spawn_gpu_memory_sampler();
     let t0 = std::time::Instant::now();
     let tokens = dino.forward(&ctx, &images, None);
     let caches = trunk.forward(&ctx, &tokens, n, h_p, w_p, None);
@@ -124,6 +125,10 @@ fn main() -> Result<()> {
     let dense = dense_head.forward(&ctx, &caches, n, h_p, w_p, None);
     ctx.sync();
     tracing::info!("inference: {:.1?}", t0.elapsed());
+    if let Some(peak) = peak {
+        let bytes = peak.load(std::sync::atomic::Ordering::Relaxed);
+        tracing::info!("peak GPU memory (GTT+VRAM): {:.1} GiB", bytes as f64 / (1u64 << 30) as f64);
+    }
 
     // ---- unproject + filter (doc/01 §5, doc/06 §3) ----
     let conf_gate = confidence_threshold(&dense.conf, args.conf_quantile);
@@ -190,4 +195,43 @@ fn main() -> Result<()> {
     )?;
     tracing::info!("wrote {} and {}", args.output.display(), sidecar.display());
     Ok(())
+}
+
+/// Samples amdgpu's GTT+VRAM usage from sysfs every 50 ms on a background
+/// thread and tracks the peak. Returns None when the sysfs files are
+/// absent (non-amdgpu systems).
+fn spawn_gpu_memory_sampler() -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+    let files: Vec<PathBuf> = glob_mem_info();
+    if files.is_empty() {
+        return None;
+    }
+    let peak = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let peak2 = peak.clone();
+    std::thread::spawn(move || {
+        loop {
+            let total: u64 = files
+                .iter()
+                .filter_map(|p| std::fs::read_to_string(p).ok())
+                .filter_map(|s| s.trim().parse::<u64>().ok())
+                .sum();
+            peak2.fetch_max(total, std::sync::atomic::Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+    Some(peak)
+}
+
+fn glob_mem_info() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(cards) = std::fs::read_dir("/sys/class/drm") {
+        for card in cards.flatten() {
+            for name in ["mem_info_gtt_used", "mem_info_vram_used"] {
+                let p = card.path().join("device").join(name);
+                if p.exists() && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
 }

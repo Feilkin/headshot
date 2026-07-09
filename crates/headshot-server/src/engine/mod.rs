@@ -66,11 +66,29 @@ const ATTENTION_D128: &str = include_str!(concat!(env!("OUT_DIR"), "/attention_d
 /// so it bypasses WESL).
 const LINEAR_WMMA: &str = include_str!("../../shaders/linear_wmma.wgsl");
 
+/// Maximum submissions in flight before [`GpuContext::flush`] blocks on the
+/// oldest. This is the engine's memory backpressure: dropped buffers are
+/// only reclaimed once the submission using them completes on the GPU, and
+/// the CPU encodes the whole network in milliseconds while the GPU takes
+/// minutes — unbounded, every layer's intermediates coexist (~200 GB at
+/// 100 frames, absorbed only by GTT overcommit and paging).
+///
+/// Measured on a 100-frame drone scene (512², f16 trunk): depth 0 →
+/// 37 GiB peak / 248 s; depth 1 → 75 GiB / 230 s; depth 2 → 118 GiB /
+/// 227 s. Each unit of depth retains ~38 GiB — far more than one
+/// submission's ~5–9 GB of transients, i.e. the allocator grows heavily
+/// under interleaved alloc/free generations. Until the engine gets a
+/// buffer-reuse pool, full serialization is the right default: ~9 % wall
+/// clock for a budget compatible with 500-frame sessions. Override with
+/// HEADSHOT_MAX_IN_FLIGHT for experiments.
+const MAX_IN_FLIGHT: usize = 0;
+
 pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pipelines: HashMap<&'static str, wgpu::ComputePipeline>,
     encoder: Mutex<Option<wgpu::CommandEncoder>>,
+    in_flight: Mutex<std::collections::VecDeque<wgpu::SubmissionIndex>>,
     /// shader-f16 available: the f16 kernel variants exist.
     pub f16_supported: bool,
     /// 16x16x16 f16→f32 cooperative matrix available: `linear_wmma` exists.
@@ -175,6 +193,7 @@ impl GpuContext {
             queue,
             pipelines,
             encoder: Mutex::new(None),
+            in_flight: Mutex::new(std::collections::VecDeque::new()),
             f16_supported,
             wmma_supported,
         })
@@ -230,7 +249,26 @@ impl GpuContext {
     /// Submit all encoded work. Cheap no-op when nothing is pending.
     pub fn flush(&self) {
         if let Some(encoder) = self.encoder.lock().unwrap().take() {
-            self.queue.submit([encoder.finish()]);
+            let index = self.queue.submit([encoder.finish()]);
+            let mut in_flight = self.in_flight.lock().unwrap();
+            in_flight.push_back(index);
+            // Backpressure (see MAX_IN_FLIGHT): block on the oldest
+            // submission so completed blocks' buffers get reclaimed before
+            // the next block allocates its own.
+            let max_in_flight = std::env::var("HEADSHOT_MAX_IN_FLIGHT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(MAX_IN_FLIGHT);
+            while in_flight.len() > max_in_flight {
+                let oldest = in_flight.pop_front().unwrap();
+                let t = std::time::Instant::now();
+                self.device
+                    .poll(wgpu::PollType::Wait { submission_index: Some(oldest), timeout: None })
+                    .expect("device poll");
+                if std::env::var_os("HEADSHOT_TRACE_FLUSH").is_some() {
+                    eprintln!("flush wait: {:?}", t.elapsed());
+                }
+            }
         }
     }
 
@@ -240,6 +278,7 @@ impl GpuContext {
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device poll");
+        self.in_flight.lock().unwrap().clear();
     }
 
     /// Record a buffer-to-buffer copy in the open encoder (used for token
