@@ -124,7 +124,14 @@ impl Trunk {
                     tap(&format!("trunk.inter.{k:02}"), &inter_out);
                 }
                 if headshot_shared::model::CACHED_LAYERS.contains(&k) {
+                    // cached head inputs are f32 (doc/01 §3.3) — the heads'
+                    // autocast boundary
                     let cache = ctx.concat_channels(&frame_out, &inter_out);
+                    let cache = if cache.dtype == Dtype::F16 {
+                        ctx.cast_to_f32(&cache)
+                    } else {
+                        cache
+                    };
                     if let Some(tap) = tap.as_deref_mut() {
                         tap(&format!("cache.{k:02}"), &cache);
                     }

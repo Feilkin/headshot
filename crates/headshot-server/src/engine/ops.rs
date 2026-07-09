@@ -231,15 +231,20 @@ impl GpuContext {
         );
     }
 
-    /// Non-causal flash attention over head-major q, k, v (S, H, T, 64);
-    /// softmax statistics and accumulation in f32. Workgroup-tiled: grid is
-    /// (query tiles of 64, S·H).
+    /// Non-causal flash attention over head-major q, k, v (S, H, T, D);
+    /// softmax statistics and accumulation in f32. D is 64 (trunk/DINO) or
+    /// 128 (camera head, f32 only). Grid: (query tiles of 64, S·H).
     pub fn attention(&self, q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> GpuTensor {
         let [s, h, t, d] = q.shape[..] else { panic!("attention wants (S,H,T,D)") };
-        assert_eq!(d, 64, "attention kernel is specialized to head_dim 64");
         assert_eq!(q.shape, k.shape);
         assert_eq!(q.shape, v.shape);
         assert!(s * h <= 65535, "attention grid y overflow");
+        let kernel = match (d, q.dtype) {
+            (64, Dtype::F32) => "attention",
+            (64, Dtype::F16) => "attention_f16",
+            (128, Dtype::F32) => "attention_d128",
+            _ => panic!("attention: unsupported head_dim {d} / {:?}", q.dtype),
+        };
         let out = self.empty_typed(&q.shape, q.dtype);
         let params = AttentionParams {
             s: s as u32,
@@ -248,7 +253,7 @@ impl GpuContext {
             scale: 1.0 / (d as f32).sqrt(),
         };
         self.dispatch(
-            variant("attention", "attention_f16", q.dtype),
+            kernel,
             bytemuck::bytes_of(&params),
             &[q, k, v, &out],
             [t.div_ceil(64) as u32, (s * h) as u32, 1],
@@ -323,6 +328,20 @@ impl GpuContext {
 }
 
 impl GpuContext {
+    /// f16 → f32 cast (trunk caches → f32 head inputs).
+    pub fn cast_to_f32(&self, x: &GpuTensor) -> GpuTensor {
+        assert_eq!(x.dtype, Dtype::F16);
+        let out = self.empty_typed(&x.shape, Dtype::F32);
+        let total = x.len() as u32;
+        self.dispatch(
+            "cast_f16_to_f32",
+            bytemuck::bytes_of(&total),
+            &[x, &out],
+            grid_2d(x.len() as u64, 256),
+        );
+        out
+    }
+
     /// f32 → f16 storage cast (stage-boundary precision change).
     pub fn cast_to_f16(&self, x: &GpuTensor) -> GpuTensor {
         assert_eq!(x.dtype, Dtype::F32);
@@ -333,6 +352,103 @@ impl GpuContext {
             bytemuck::bytes_of(&total),
             &[x, &out],
             grid_2d(x.len() as u64, 256),
+        );
+        out
+    }
+}
+
+/// Unary op selector for [`GpuContext::unary`].
+#[derive(Clone, Copy)]
+pub enum UnaryOp {
+    Relu = 0,
+    Exp = 1,
+    OnePlusExp = 2,
+}
+
+impl GpuContext {
+    /// Elementwise unary (dense head; f32 only).
+    pub fn unary(&self, x: &GpuTensor, op: UnaryOp) -> GpuTensor {
+        assert_eq!(x.dtype, Dtype::F32);
+        let out = self.empty(&x.shape);
+        let params = [x.len() as u32, op as u32];
+        self.dispatch(
+            "unary",
+            bytemuck::cast_slice(&params),
+            &[x, &out],
+            grid_2d(x.len() as u64, 256),
+        );
+        out
+    }
+
+    /// `out[i] = x[i] + table[i % table.len()]` — per-image broadcast add
+    /// (UV positional embedding; f32 only).
+    pub fn tiled_add(&self, x: &GpuTensor, table: &GpuTensor) -> GpuTensor {
+        assert_eq!(x.dtype, Dtype::F32);
+        assert_eq!(table.dtype, Dtype::F32);
+        assert_eq!(x.len() % table.len(), 0, "table must tile x");
+        let out = self.empty(&x.shape);
+        let params = [x.len() as u32, table.len() as u32];
+        self.dispatch(
+            "tiled_add",
+            bytemuck::cast_slice(&params),
+            &[x, table, &out],
+            grid_2d(x.len() as u64, 256),
+        );
+        out
+    }
+
+    /// NHWC 3×3 im2col, pad 1: (n, h, w, c) → (n·oh·ow, 9c); the conv is a
+    /// following `linear` with weight (oc, 9c). f32 only.
+    pub fn im2col3x3(&self, x: &GpuTensor, stride: usize) -> GpuTensor {
+        assert_eq!(x.dtype, Dtype::F32);
+        let [n, h, w, c] = x.shape[..] else { panic!("im2col3x3 wants NHWC") };
+        let oh = (h + 2 - 3) / stride + 1;
+        let ow = (w + 2 - 3) / stride + 1;
+        let out = self.empty(&[n * oh * ow, 9 * c]);
+        let params = [
+            n as u32, h as u32, w as u32, c as u32, stride as u32, oh as u32, ow as u32, 0,
+        ];
+        self.dispatch(
+            "im2col3x3",
+            bytemuck::cast_slice(&params),
+            &[x, &out],
+            grid_2d(out.len() as u64, 256),
+        );
+        out
+    }
+
+    /// Rows (n·h·w, k²·oc) → NHWC (n, h·k, w·k, oc), channel j = o·k²+dy·k+dx.
+    /// Kernel==stride ConvTranspose tail and the final pixel shuffle. f32.
+    pub fn shuffle_expand(&self, x: &GpuTensor, n: usize, h: usize, w: usize, k: usize) -> GpuTensor {
+        assert_eq!(x.dtype, Dtype::F32);
+        let cols = *x.shape.last().unwrap();
+        assert_eq!(x.len(), n * h * w * cols);
+        assert_eq!(cols % (k * k), 0);
+        let oc = cols / (k * k);
+        let out = self.empty(&[n, h * k, w * k, oc]);
+        let params = [n as u32, h as u32, w as u32, k as u32, oc as u32, 0, 0, 0];
+        self.dispatch(
+            "shuffle_expand",
+            bytemuck::cast_slice(&params),
+            &[x, &out],
+            grid_2d(out.len() as u64, 256),
+        );
+        out
+    }
+
+    /// NHWC bilinear resize, align_corners=True. f32 only.
+    pub fn bilinear(&self, x: &GpuTensor, oh: usize, ow: usize) -> GpuTensor {
+        assert_eq!(x.dtype, Dtype::F32);
+        let [n, ih, iw, c] = x.shape[..] else { panic!("bilinear wants NHWC") };
+        let out = self.empty(&[n, oh, ow, c]);
+        let params = [
+            n as u32, ih as u32, iw as u32, oh as u32, ow as u32, c as u32, 0, 0,
+        ];
+        self.dispatch(
+            "bilinear",
+            bytemuck::cast_slice(&params),
+            &[x, &out],
+            grid_2d(out.len() as u64, 256),
         );
         out
     }

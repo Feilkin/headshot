@@ -13,6 +13,7 @@ bytemuck.workspace = true
 clap.workspace = true
 half.workspace = true
 headshot-shared.workspace = true
+image = "0.25.10"
 memmap2 = "0.9.11"
 safetensors = "0.8.0"
 serde.workspace = true

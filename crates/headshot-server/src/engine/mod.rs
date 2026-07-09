@@ -50,7 +50,18 @@ const DUAL_KERNELS: &[(&str, &str)] = kernel_sources![
 ];
 
 const RESIDUAL_ADD: &str = include_str!(concat!(env!("OUT_DIR"), "/residual_add.wgsl"));
+/// Dense-head kernels (f32 only; doc/01 §4.2).
+const DENSE_KERNELS: &[(&str, &str)] = &[
+    ("unary", include_str!(concat!(env!("OUT_DIR"), "/unary.wgsl"))),
+    ("tiled_add", include_str!(concat!(env!("OUT_DIR"), "/tiled_add.wgsl"))),
+    ("im2col3x3", include_str!(concat!(env!("OUT_DIR"), "/im2col3x3.wgsl"))),
+    ("shuffle_expand", include_str!(concat!(env!("OUT_DIR"), "/shuffle_expand.wgsl"))),
+    ("bilinear", include_str!(concat!(env!("OUT_DIR"), "/bilinear.wgsl"))),
+];
 const CAST_TO_F16: &str = include_str!(concat!(env!("OUT_DIR"), "/cast_f32_to_f16.wgsl"));
+const CAST_TO_F32: &str = include_str!(concat!(env!("OUT_DIR"), "/cast_f16_to_f32.wgsl"));
+/// Camera-head attention: head_dim 128, f32 only (doc/01 §4.1).
+const ATTENTION_D128: &str = include_str!(concat!(env!("OUT_DIR"), "/attention_d128.wgsl"));
 /// Plain WGSL (naga cooperative-matrix extension; wgsl-parse can't parse it,
 /// so it bypasses WESL).
 const LINEAR_WMMA: &str = include_str!("../../shaders/linear_wmma.wgsl");
@@ -145,9 +156,15 @@ impl GpuContext {
             pipelines.insert(*name, make_pipeline(&device, name, source));
         }
         pipelines.insert("residual_add", make_pipeline(&device, "residual_add", RESIDUAL_ADD));
+        for (name, source) in DENSE_KERNELS {
+            pipelines.insert(*name, make_pipeline(&device, name, source));
+        }
+        pipelines.insert("attention_d128", make_pipeline(&device, "attention_d128", ATTENTION_D128));
         if f16_supported {
             pipelines
                 .insert("cast_f32_to_f16", make_pipeline(&device, "cast_f32_to_f16", CAST_TO_F16));
+            pipelines
+                .insert("cast_f16_to_f32", make_pipeline(&device, "cast_f16_to_f32", CAST_TO_F32));
         }
         if wmma_supported {
             pipelines.insert("linear_wmma", make_pipeline(&device, "linear_wmma", LINEAR_WMMA));

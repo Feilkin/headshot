@@ -22,12 +22,25 @@ const DUAL_KERNELS: &[&str] = &[
 
 // linear_wmma.wgsl is NOT compiled through WESL: wgsl-parse has no
 // cooperative-matrix syntax; it ships as plain WGSL, included directly.
-const SINGLE_KERNELS: &[&str] = &["residual_add", "cast_f32_to_f16"];
+const SINGLE_KERNELS: &[&str] = &[
+    "residual_add",
+    "cast_f32_to_f16",
+    "cast_f16_to_f32",
+    // dense head, f32 only
+    "unary",
+    "tiled_add",
+    "im2col3x3",
+    "shuffle_expand",
+    "bilinear",
+];
 
-fn compile(kernel: &str, f16: bool, artifact: &str) {
+fn compile(kernel: &str, flags: &[(&str, bool)], artifact: &str) {
     let mut wesl = wesl::Wesl::new("shaders");
     let features = wesl::Features {
-        flags: HashMap::from([("f16".to_string(), wesl::Feature::from(f16))]),
+        flags: flags
+            .iter()
+            .map(|(name, on)| (name.to_string(), wesl::Feature::from(*on)))
+            .collect::<HashMap<_, _>>(),
         ..Default::default()
     };
     wesl.set_options(wesl::CompileOptions { features, ..Default::default() });
@@ -37,11 +50,13 @@ fn compile(kernel: &str, f16: bool, artifact: &str) {
 
 fn main() {
     for kernel in DUAL_KERNELS {
-        compile(kernel, false, kernel);
-        compile(kernel, true, &format!("{kernel}_f16"));
+        compile(kernel, &[("f16", false), ("d128", false)], kernel);
+        compile(kernel, &[("f16", true), ("d128", false)], &format!("{kernel}_f16"));
     }
+    // camera-head attention: head_dim 128, f32 only (heads run all-f32)
+    compile("attention", &[("f16", false), ("d128", true)], "attention_d128");
     for kernel in SINGLE_KERNELS {
-        compile(kernel, false, kernel);
+        compile(kernel, &[], kernel);
     }
     println!("cargo::rerun-if-changed=shaders/linear_wmma.wgsl");
 }

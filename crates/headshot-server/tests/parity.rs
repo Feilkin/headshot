@@ -11,7 +11,9 @@
 
 use headshot_server::engine::GpuContext;
 use headshot_server::engine::tensor::Dtype;
-use headshot_server::model::{dino::Dino, trunk::Trunk};
+use headshot_server::model::{
+    camera_head::CameraHead, dense_head::DenseHead, dino::Dino, trunk::Trunk,
+};
 use headshot_server::parity::{Dump, Gate, compare, fixtures_dir};
 use headshot_server::weights::Weights;
 
@@ -139,6 +141,58 @@ fn trunk_parity(scene: &str, precision: Dtype) {
     let caches = trunk.forward(&ctx, &tokens, n, h_p, w_p, Some(&mut tap));
     assert_eq!(caches.len(), 4);
 
+    // Camera head (all f32; doc/01 §4.1). pose_enc gate: abs < 1e-3 per
+    // component (doc/02 §5).
+    let camera = CameraHead::load(&ctx, &weights).expect("camera head load");
+    let mut tap = |name: &str, t: &headshot_server::engine::tensor::GpuTensor| {
+        check(name, ctx.download(t), deep_gate);
+    };
+    let pose_enc = camera.forward(&ctx, &caches[3], n, Some(&mut tap));
+    // End-to-end pose bound is drift-aware: the trunk legitimately diverges
+    // (chaotic amplification, see sensitivity.rs), and that drift lands in
+    // pose_enc. For the f16 engine the bound self-calibrates against the
+    // reference's own bf16-vs-f32 pose sensitivity (worst 1.9e-2 on the
+    // realistic scene — larger than our deviation). The tight doc/02 1e-3
+    // gate applies to the isolated head test below, which feeds the
+    // *reference* cache.
+    let pose_tol = match &other_dump {
+        Some(other) => {
+            let (_, a) = dump.tensor("pose_enc").unwrap();
+            let (_, b) = other.tensor("pose_enc").unwrap();
+            let self_sens = a
+                .iter()
+                .zip(&b)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max);
+            (2.0 * self_sens).max(1e-2)
+        }
+        None => 1e-2,
+    };
+    check_pose(&dump, &pose_enc, pose_tol, &mut failures);
+
+    // Dense head end to end (our caches). Depth carries the trunk drift;
+    // gate on cosine like the trunk layers, self-calibrated for f16.
+    let dense = DenseHead::load(&ctx, &weights).expect("dense head load");
+    let out = dense.forward(&ctx, &caches, n, h_p, w_p, None);
+    let (_, depth_ref) = dump.tensor("depth").unwrap();
+    let m = compare(&out.depth, &depth_ref);
+    let mut depth_gate = deep_gate;
+    if let Some(other) = &other_dump {
+        let (_, f32_depth) = other.tensor("depth").unwrap();
+        let self_drift = 1.0 - compare(&depth_ref, &f32_depth).cosine_sim;
+        let floor = depth_gate.min_cosine.map_or(0.999, |c| 1.0 - c);
+        depth_gate.min_cosine = Some(1.0 - floor.max(2.0 * self_drift));
+    }
+    println!(
+        "           depth: rel_max {:.3e}  cosine 1-{:.3e}  (gate 1-{:.1e})",
+        m.rel_max_err(),
+        1.0 - m.cosine_sim,
+        depth_gate.min_cosine.map_or(f64::NAN, |c| 1.0 - c),
+    );
+    if let Err(e) = depth_gate.check("depth (end-to-end)", m) {
+        failures.push(e);
+    }
+
     assert!(failures.is_empty(), "parity gate failures:\n{}", failures.join("\n"));
 }
 
@@ -164,4 +218,102 @@ fn parity_trunk_f16_small() {
 #[ignore = "needs local fixtures + GPU (just parity)"]
 fn parity_trunk_f16_realistic() {
     trunk_parity("realistic", Dtype::F16);
+}
+
+
+fn check_pose(dump: &Dump, pose_enc: &[f32], tol: f32, failures: &mut Vec<String>) {
+    let (_, ref_pose) = dump.tensor("pose_enc").unwrap();
+    assert_eq!(pose_enc.len(), ref_pose.len());
+    let mut worst = 0.0f32;
+    for (i, (ours, want)) in pose_enc.iter().zip(&ref_pose).enumerate() {
+        let (frame, comp) = (i / 9, i % 9);
+        let err = (ours - want).abs();
+        worst = worst.max(err);
+        if err > tol {
+            failures.push(format!(
+                "pose_enc[{frame}][{comp}]: {ours} vs {want}, abs err {err:.3e} > {tol:.0e}"
+            ));
+        }
+    }
+    println!("        pose_enc: worst abs err {worst:.3e} (gate {tol:.0e})");
+}
+
+/// Head parity in isolation (doc/02 §5 gates): the *reference* cached
+/// tensors from the dump drive our head, decoupling head correctness from
+/// trunk drift.
+fn heads_isolated(scene: &str) {
+    let ctx = GpuContext::new().expect("GPU required for parity");
+    let weights = Weights::open(&fixtures_dir()).expect("converted weights");
+    let dump = Dump::open(scene, "f32").expect("f32 dump");
+    let n = dump.meta.n_frames;
+
+    let load_cache = |name: &str| {
+        let (shape, data) = dump.tensor(name).unwrap();
+        let rows: usize = shape[..shape.len() - 1].iter().product();
+        ctx.tensor_from_slice(&[rows, 2048], &data)
+    };
+    let caches: Vec<_> =
+        ["cache.04", "cache.11", "cache.17", "cache.23"].map(load_cache).into();
+
+    let camera = CameraHead::load(&ctx, &weights).expect("camera head load");
+    let mut failures = Vec::new();
+    let pose_enc = camera.forward(&ctx, &caches[3], n, None);
+    check_pose(&dump, &pose_enc, 1e-3, &mut failures);
+
+    // Dense head on the reference caches (doc/02 §5: depth rel < 1e-3 at
+    // f32). dense.fused in the dump is NCHW; ours is NHWC — permute.
+    let (h_p, w_p) = (dump.meta.height as usize / 16, dump.meta.width as usize / 16);
+    let dense = DenseHead::load(&ctx, &weights).expect("dense head load");
+    let gate = Gate { rel_max: Some(1e-3), min_cosine: Some(1.0 - 1e-6) };
+    let mut fused_ours: Vec<f32> = Vec::new();
+    let mut tap = |name: &str, t: &headshot_server::engine::tensor::GpuTensor| {
+        if name == "dense.fused" {
+            fused_ours.extend(ctx.download(t));
+        }
+    };
+    let out = dense.forward(&ctx, &caches, n, h_p, w_p, Some(&mut tap));
+
+    let (fshape, fused_ref) = dump.tensor("dense.fused").unwrap();
+    let [fn_, fc, fh, fw] = fshape[..] else { panic!("fused shape") };
+    let mut fused_ref_nhwc = vec![0.0f32; fused_ref.len()];
+    for ni in 0..fn_ {
+        for c in 0..fc {
+            for y in 0..fh {
+                for x in 0..fw {
+                    fused_ref_nhwc[((ni * fh + y) * fw + x) * fc + c] =
+                        fused_ref[((ni * fc + c) * fh + y) * fw + x];
+                }
+            }
+        }
+    }
+    for (name, ours, reference) in [
+        ("dense.fused", &fused_ours, &fused_ref_nhwc),
+        ("depth", &out.depth, &dump.tensor("depth").unwrap().1),
+        ("depth_conf", &out.conf, &dump.tensor("depth_conf").unwrap().1),
+    ] {
+        let m = compare(ours, reference);
+        println!(
+            "{name:>12}: rel_max {:.3e}  ref_scale {:8.2}  cosine 1-{:.3e}",
+            m.rel_max_err(),
+            m.ref_scale,
+            1.0 - m.cosine_sim
+        );
+        if let Err(e) = gate.check(name, m) {
+            failures.push(e);
+        }
+    }
+
+    assert!(failures.is_empty(), "isolated-head failures:\n{}", failures.join("\n"));
+}
+
+#[test]
+#[ignore = "needs local fixtures + GPU (just parity)"]
+fn parity_heads_isolated_small() {
+    heads_isolated("small");
+}
+
+#[test]
+#[ignore = "needs local fixtures + GPU (just parity)"]
+fn parity_heads_isolated_realistic() {
+    heads_isolated("realistic");
 }

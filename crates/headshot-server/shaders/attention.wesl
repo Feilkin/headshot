@@ -1,4 +1,5 @@
-// Non-causal flash attention (doc/03 §1 item 1), head_dim 64, f32 math.
+// Non-causal flash attention (doc/03 §1 item 1), head_dim 64 (or 128 with
+// the d128 feature — camera head), f32 math.
 // q, k, v head-major (S, H, T, D=64) → out same layout, bound as vec4
 // arrays (D = 16 vec4s).
 //
@@ -29,7 +30,8 @@ struct Params {
 @group(0) @binding(3) var<storage, read> v: array<EV>;
 @group(0) @binding(4) var<storage, read_write> out: array<EV>;
 
-const DV: u32 = 16u; // head_dim in vec4s (64 / 4)
+@if(d128) const DV: u32 = 32u; // head_dim 128 in vec4s
+@if(!d128) const DV: u32 = 16u; // head_dim 64 in vec4s
 
 @compute @workgroup_size(64)
 fn main(

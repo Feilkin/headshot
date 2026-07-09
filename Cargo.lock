@@ -3205,6 +3205,7 @@ dependencies = [
  "clap",
  "half",
  "headshot-shared",
+ "image",
  "libm",
  "memmap2",
  "safetensors",
