@@ -28,4 +28,5 @@ wgpu.workspace = true
 wesl = "0.4.0"
 
 [dev-dependencies]
+libm = "0.2.16"
 tempfile = "3.27.0"

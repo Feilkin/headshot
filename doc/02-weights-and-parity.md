@@ -118,13 +118,24 @@ installed via `pip install` from Meta's GitHub):
 - Save as one safetensors file + the exact preprocessed input tensor.
 
 **Rust comparison test**: runs our engine on the dumped input, compares each
-checkpoint tensor with: max-abs-error, mean-abs-error, cosine similarity.
-Gates (initial, tune with experience):
-- f32 stages (heads): max-abs < 1e-4, cosine > 1 − 1e-7.
-- f16-compute trunk: drift grows with depth; gate on cosine > 0.999 per layer
-  and eyeball the trend — a kernel bug shows as a cliff at one layer, not a
-  gradual drift. For exact isolation, support an all-f32 mode in the engine
-  (slow, debug only) with tight gates: max-abs < 1e-3 by layer 23.
+checkpoint tensor with: max-abs-error (also relative to max |reference| —
+trunk activations grow to O(30–150), so absolute thresholds must be
+scale-relative), mean-abs-error, cosine similarity.
+
+Gates (revised 2026-07-09 from measurement; original absolute values were
+untenable): the trunk amplifies tiny perturbations — a 1e-6 relative input
+perturbation reaches ~4e-4 relative by layer 23 on the small scene and
+~1.1e-2 on the realistic scene (growth starts around layer 13; see
+`tests/sensitivity.rs`). Per-op reduction-order noise between any two
+*correct* f32 implementations therefore reaches ~5e-3 (small) to ~1e-1
+(realistic) rel-max in deep layers, while cosine stays ≥ 1 − 3e-5. Cosine
+is the load-bearing per-layer gate; absolute/relative error only catches
+scale- and NaN-class bugs.
+- f32 stages (heads, patch embed): rel-max < 1e-4, cosine > 1 − 1e-6.
+- all-f32 debug trunk vs f32-forced dump: cosine > 1 − 1e-4 per layer,
+  rel-max < 0.5 (sanity). A kernel bug shows as a cliff at one layer, not
+  a gradual drift — always eyeball the per-layer trend.
+- f16-compute trunk vs bf16 dump: cosine > 0.999 per layer, no cliff.
 - `pose_enc`: abs < 1e-3 per component. `depth`: relative < 1e-2 at f16,
   < 1e-3 at f32.
 

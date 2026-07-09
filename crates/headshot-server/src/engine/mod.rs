@@ -1,0 +1,229 @@
+//! WGSL inference engine (doc/03).
+//!
+//! M1 state: all-f32 compute — this is the "debug mode" of doc/02 §5 and the
+//! correctness baseline the parity gates validate; the f16-storage /
+//! f32-accumulate fast path (WMMA) layers on top later.
+//!
+//! Execution model: ops encode compute dispatches into one open command
+//! encoder on [`GpuContext`]; nothing runs until [`GpuContext::flush`] (or a
+//! download, which flushes first). This keeps per-op overhead low without a
+//! scheduler.
+
+pub mod ops;
+pub mod rope;
+pub mod tensor;
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use anyhow::{Context as _, Result};
+use tensor::GpuTensor;
+use wgpu::util::DeviceExt;
+
+/// Compiled-in WGSL sources (WESL artifacts from build.rs).
+macro_rules! kernel_sources {
+    ($($name:literal),* $(,)?) => {
+        &[$(($name, include_str!(concat!(env!("OUT_DIR"), "/", $name, ".wgsl")))),*]
+    };
+}
+
+const KERNELS: &[(&str, &str)] = kernel_sources![
+    "residual_add",
+    "linear",
+    "layernorm",
+    "gelu",
+    "residual_ls",
+    "qkv_split",
+    "attn_merge",
+    "rope_apply",
+    "attention",
+    "im2col_patch",
+    "concat_channels",
+];
+
+pub struct GpuContext {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pipelines: HashMap<&'static str, wgpu::ComputePipeline>,
+    encoder: Mutex<Option<wgpu::CommandEncoder>>,
+}
+
+impl GpuContext {
+    /// Create a context on the first available adapter. `Err` when no
+    /// adapter exists (CI without a GPU) — callers in tests skip then.
+    pub fn new() -> Result<Self> {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let adapter = pollster_block(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        }))
+        .context("no GPU adapter")?;
+
+        // Activations at high frame counts exceed the default 128 MiB
+        // binding limit; take what the adapter offers.
+        let adapter_limits = adapter.limits();
+        let mut limits = wgpu::Limits::defaults();
+        limits.max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size;
+        limits.max_buffer_size = adapter_limits.max_buffer_size;
+        limits.max_storage_buffers_per_shader_stage =
+            adapter_limits.max_storage_buffers_per_shader_stage;
+
+        let mut features = wgpu::Features::empty();
+        for wanted in [
+            wgpu::Features::SHADER_F16,
+            wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX,
+            wgpu::Features::TIMESTAMP_QUERY,
+        ] {
+            if adapter.features().contains(wanted) {
+                features |= wanted;
+            }
+        }
+
+        let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("headshot-engine"),
+            required_features: features,
+            required_limits: limits,
+            // Cooperative matrix (the WMMA GEMM path, doc/03) is behind
+            // wgpu's experimental opt-in.
+            // SAFETY: acknowledges possible bugs in experimental APIs.
+            experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+            ..Default::default()
+        }))?;
+
+        let mut pipelines = HashMap::new();
+        for (name, source) in KERNELS {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(name),
+                source: wgpu::ShaderSource::Wgsl((*source).into()),
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(name),
+                layout: None,
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            pipelines.insert(*name, pipeline);
+        }
+
+        Ok(Self { device, queue, pipelines, encoder: Mutex::new(None) })
+    }
+
+    /// Encode one compute dispatch. Convention shared by every kernel:
+    /// binding 0 is a uniform param struct, bindings 1.. are storage buffers
+    /// in argument order.
+    pub fn dispatch(
+        &self,
+        kernel: &str,
+        params: &[u8],
+        buffers: &[&GpuTensor],
+        workgroups: [u32; 3],
+    ) {
+        let pipeline = self
+            .pipelines
+            .get(kernel)
+            .unwrap_or_else(|| panic!("unknown kernel {kernel}"));
+        let params_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(kernel),
+            contents: params,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: params_buf.as_entire_binding(),
+        }];
+        for (i, tensor) in buffers.iter().enumerate() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: (i + 1) as u32,
+                resource: tensor.buffer.as_entire_binding(),
+            });
+        }
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(kernel),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &entries,
+        });
+
+        let mut guard = self.encoder.lock().unwrap();
+        let encoder = guard.get_or_insert_with(|| {
+            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("engine"),
+            })
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
+    }
+
+    /// Submit all encoded work. Cheap no-op when nothing is pending.
+    pub fn flush(&self) {
+        if let Some(encoder) = self.encoder.lock().unwrap().take() {
+            self.queue.submit([encoder.finish()]);
+        }
+    }
+
+    /// Flush and block until the GPU is idle.
+    pub fn sync(&self) {
+        self.flush();
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll");
+    }
+
+    /// Record a buffer-to-buffer copy in the open encoder (used for token
+    /// gather/scatter where the region is contiguous).
+    pub fn copy(
+        &self,
+        src: &GpuTensor,
+        src_offset: u64,
+        dst: &GpuTensor,
+        dst_offset: u64,
+        bytes: u64,
+    ) {
+        let mut guard = self.encoder.lock().unwrap();
+        let encoder = guard.get_or_insert_with(|| {
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("engine") })
+        });
+        encoder.copy_buffer_to_buffer(&src.buffer, src_offset, &dst.buffer, dst_offset, bytes);
+    }
+}
+
+/// 2D grid for `total` threads at `wg` threads/workgroup, avoiding the
+/// 65535 per-dimension dispatch limit. Kernels using this compute
+/// `index = (wg_id.y * num_wg_x + wg_id.x) * wg_size + local_index`.
+pub fn grid_2d(total: u64, wg: u64) -> [u32; 3] {
+    let wgs = total.div_ceil(wg);
+    if wgs <= 65535 {
+        [wgs as u32, 1, 1]
+    } else {
+        let x = 256u64;
+        [x as u32, wgs.div_ceil(x) as u32, 1]
+    }
+}
+
+/// Minimal blocking executor for wgpu's native (immediately-ready) futures.
+pub(crate) fn pollster_block<F: Future>(future: F) -> F::Output {
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    fn noop_raw_waker() -> RawWaker {
+        fn clone(_: *const ()) -> RawWaker {
+            noop_raw_waker()
+        }
+        fn noop(_: *const ()) {}
+        RawWaker::new(std::ptr::null(), &RawWakerVTable::new(clone, noop, noop, noop))
+    }
+
+    let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
+    let mut cx = Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(out) => return out,
+            Poll::Pending => std::thread::yield_now(),
+        }
+    }
+}

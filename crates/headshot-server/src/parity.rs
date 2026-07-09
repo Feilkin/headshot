@@ -20,6 +20,16 @@ pub struct Metrics {
     pub max_abs_err: f64,
     pub mean_abs_err: f64,
     pub cosine_sim: f64,
+    /// max |reference| — the activation scale the errors live on. Trunk
+    /// activations grow to O(100–1000), so gates use `rel_max_err`.
+    pub ref_scale: f64,
+}
+
+impl Metrics {
+    /// `max_abs_err` relative to the reference's own magnitude.
+    pub fn rel_max_err(&self) -> f64 {
+        self.max_abs_err / self.ref_scale.max(f64::MIN_POSITIVE)
+    }
 }
 
 pub fn compare(ours: &[f32], reference: &[f32]) -> Metrics {
@@ -30,6 +40,7 @@ pub fn compare(ours: &[f32], reference: &[f32]) -> Metrics {
     let mut dot: f64 = 0.0;
     let mut norm_a: f64 = 0.0;
     let mut norm_b: f64 = 0.0;
+    let mut ref_scale: f64 = 0.0;
     for (&a, &b) in ours.iter().zip(reference) {
         let (a, b) = (a as f64, b as f64);
         let d = (a - b).abs();
@@ -38,34 +49,47 @@ pub fn compare(ours: &[f32], reference: &[f32]) -> Metrics {
         dot += a * b;
         norm_a += a * a;
         norm_b += b * b;
+        ref_scale = ref_scale.max(b.abs());
     }
     Metrics {
         max_abs_err: max_abs,
         mean_abs_err: sum_abs / ours.len() as f64,
         cosine_sim: dot / (norm_a.sqrt() * norm_b.sqrt()).max(f64::MIN_POSITIVE),
+        ref_scale,
     }
 }
 
-/// A pass/fail gate over [`Metrics`] (doc/02 §5 values; tune with experience).
+/// A pass/fail gate over [`Metrics`]. Values from doc/02 §5, adjusted by
+/// measurement: absolute thresholds are scale-relative because trunk
+/// activations reach O(100–1000) while cosine stays ~1−2e-6 per layer in
+/// the all-f32 engine — a kernel bug shows as a cliff, not smooth drift.
 #[derive(Debug, Clone, Copy)]
 pub struct Gate {
-    pub max_abs: Option<f64>,
+    pub rel_max: Option<f64>,
     pub min_cosine: Option<f64>,
 }
 
 impl Gate {
     /// f32 stages (heads) and the all-f32 debug engine at shallow depth.
-    pub const F32_TIGHT: Gate = Gate { max_abs: Some(1e-4), min_cosine: Some(1.0 - 1e-7) };
-    /// all-f32 debug mode by trunk layer 23.
-    pub const F32_DEEP: Gate = Gate { max_abs: Some(1e-3), min_cosine: Some(1.0 - 1e-7) };
+    pub const F32_TIGHT: Gate = Gate { rel_max: Some(1e-4), min_cosine: Some(1.0 - 1e-6) };
+    /// all-f32 debug mode through the trunk. The bounds are measured, not
+    /// arbitrary (tests/sensitivity.rs): the trunk amplifies a 1e-6 input
+    /// perturbation to ~4e-4 (small scene) / ~1.1e-2 (realistic, 8×624×416)
+    /// by layer 23, so reduction-order noise vs the CPU reference reaches
+    /// ~5e-3 / ~1e-1 rel-max in deep layers while cosine stays ≥ 1−3e-5.
+    /// Cosine carries the gate; rel_max only catches scale/NaN-class bugs.
+    pub const F32_DEEP: Gate = Gate { rel_max: Some(0.5), min_cosine: Some(1.0 - 1e-4) };
     /// f16-compute trunk, per layer — watch for cliffs, not the drift.
-    pub const F16_TRUNK: Gate = Gate { max_abs: None, min_cosine: Some(0.999) };
+    pub const F16_TRUNK: Gate = Gate { rel_max: None, min_cosine: Some(0.999) };
 
     pub fn check(&self, name: &str, m: Metrics) -> Result<Metrics, String> {
-        if let Some(gate) = self.max_abs
-            && m.max_abs_err > gate
+        if let Some(gate) = self.rel_max
+            && m.rel_max_err() > gate
         {
-            return Err(format!("{name}: max_abs_err {:.3e} > {gate:.3e} ({m:?})", m.max_abs_err));
+            return Err(format!(
+                "{name}: rel_max_err {:.3e} > {gate:.3e} ({m:?})",
+                m.rel_max_err()
+            ));
         }
         if let Some(gate) = self.min_cosine
             && m.cosine_sim < gate
@@ -171,13 +195,20 @@ mod tests {
 
     #[test]
     fn gate_check() {
-        let good = Metrics { max_abs_err: 1e-5, mean_abs_err: 1e-6, cosine_sim: 1.0 };
-        let drifted = Metrics { max_abs_err: 0.5, mean_abs_err: 0.1, cosine_sim: 0.9 };
+        let good =
+            Metrics { max_abs_err: 1e-5, mean_abs_err: 1e-6, cosine_sim: 1.0, ref_scale: 1.0 };
+        let drifted =
+            Metrics { max_abs_err: 0.5, mean_abs_err: 0.1, cosine_sim: 0.9, ref_scale: 1.0 };
         assert!(Gate::F32_TIGHT.check("t", good).is_ok());
         assert!(Gate::F32_TIGHT.check("t", drifted).is_err());
         assert!(Gate::F16_TRUNK.check("t", drifted).is_err());
-        // F16 gate has no max_abs bound: large-but-aligned drift passes.
-        let aligned = Metrics { max_abs_err: 0.5, mean_abs_err: 0.1, cosine_sim: 0.9999 };
+        // F16 gate has no abs bound: large-but-aligned drift passes.
+        let aligned =
+            Metrics { max_abs_err: 0.5, mean_abs_err: 0.1, cosine_sim: 0.9999, ref_scale: 1.0 };
         assert!(Gate::F16_TRUNK.check("t", aligned).is_ok());
+        // same absolute error on large-scale activations passes F32_DEEP
+        let scaled =
+            Metrics { max_abs_err: 0.5, mean_abs_err: 0.1, cosine_sim: 1.0, ref_scale: 1000.0 };
+        assert!(Gate::F32_DEEP.check("t", scaled).is_ok());
     }
 }
