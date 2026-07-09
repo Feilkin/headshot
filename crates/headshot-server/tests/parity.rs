@@ -10,6 +10,7 @@
 //! `HEADSHOT_FIXTURES_DIR` overrides the fixture location.
 
 use headshot_server::engine::GpuContext;
+use headshot_server::engine::tensor::Dtype;
 use headshot_server::model::{dino::Dino, trunk::Trunk};
 use headshot_server::parity::{Dump, Gate, compare, fixtures_dir};
 use headshot_server::weights::Weights;
@@ -61,13 +62,25 @@ fn parity_dumps_are_consistent() {
     }
 }
 
-/// M1 gate: all-f32 engine vs the f32-forced reference dump, per layer
-/// (doc/02 §5). DINO output is tight; trunk drift is gated at 1e-3 by
-/// layer 23.
-fn trunk_f32_parity(scene: &str) {
+/// M1 gate (doc/02 §5): the engine at `precision` vs the matching
+/// reference dump ("f32"-forced for the all-f32 debug engine with the
+/// measured-relative gates; "bf16" autocast for the f16 engine with the
+/// cosine-only cliff gates).
+fn trunk_parity(scene: &str, precision: Dtype) {
     let ctx = GpuContext::new().expect("GPU required for parity");
     let weights = Weights::open(&fixtures_dir()).expect("converted weights");
-    let dump = Dump::open(scene, "f32").expect("f32 dump");
+    let (ref_variant, shallow_gate, deep_gate) = match precision {
+        Dtype::F32 => ("f32", Gate::F32_TIGHT, Gate::F32_DEEP),
+        Dtype::F16 => ("bf16", Gate::F16_TRUNK, Gate::F16_TRUNK),
+    };
+    let dump = Dump::open(scene, ref_variant).expect("reference dump");
+    // The f16 gate self-calibrates per layer: our divergence from the bf16
+    // dump must stay within 2x the reference's own bf16-vs-f32 divergence
+    // (floored at the static 1e-3) — measured, the two are the same size
+    // at deep layers on the realistic scene (both ~1.7e-3 at layer 23),
+    // because both are precision noise amplified by the trunk's gain.
+    let other_dump =
+        (precision == Dtype::F16).then(|| Dump::open(scene, "f32").expect("f32 dump"));
 
     let (shape, images) = dump.tensor("images").unwrap();
     let [n, _, height, width] = shape[..] else { panic!("images shape") };
@@ -76,6 +89,14 @@ fn trunk_f32_parity(scene: &str) {
 
     let mut failures: Vec<String> = Vec::new();
     let mut check = |name: &str, ours: Vec<f32>, gate: Gate| {
+        // some taps (per-DINO-block) have no reference tensor — NaN screen only
+        if !dump.meta.shapes.contains_key(name) {
+            let nan = ours.iter().filter(|v| !v.is_finite()).count();
+            if nan > 0 {
+                failures.push(format!("{name}: {nan}/{} non-finite values", ours.len()));
+            }
+            return;
+        }
         let (ref_shape, reference) = dump.tensor(name).unwrap();
         assert_eq!(
             ours.len(),
@@ -83,28 +104,37 @@ fn trunk_f32_parity(scene: &str) {
             "{name}: element count vs dump {ref_shape:?}"
         );
         let m = compare(&ours, &reference);
+        let mut gate = gate;
+        if let Some(other) = &other_dump
+            && let Ok((_, f32_ref)) = other.tensor(name)
+        {
+            let self_drift = 1.0 - compare(&reference, &f32_ref).cosine_sim;
+            let floor = gate.min_cosine.map_or(0.999, |c| 1.0 - c);
+            gate.min_cosine = Some(1.0 - floor.max(2.0 * self_drift));
+        }
         println!(
-            "{name:>16}: rel_max {:.3e}  max_abs {:.3e}  ref_scale {:8.1}  cosine 1-{:.3e}",
+            "{name:>16}: rel_max {:.3e}  max_abs {:.3e}  ref_scale {:8.1}  cosine 1-{:.3e}  (gate 1-{:.1e})",
             m.rel_max_err(),
             m.max_abs_err,
             m.ref_scale,
-            1.0 - m.cosine_sim
+            1.0 - m.cosine_sim,
+            gate.min_cosine.map_or(f64::NAN, |c| 1.0 - c),
         );
         if let Err(e) = gate.check(name, m) {
             failures.push(e);
         }
     };
 
-    let dino = Dino::load(&ctx, &weights).expect("dino load");
+    let dino = Dino::load(&ctx, &weights, precision).expect("dino load");
     let mut tap = |name: &str, t: &headshot_server::engine::tensor::GpuTensor| {
-        let gate = if name.starts_with("dino.patch_embed") { Gate::F32_TIGHT } else { Gate::F32_DEEP };
+        let gate = if name.starts_with("dino.patch_embed") { shallow_gate } else { deep_gate };
         check(name, ctx.download(t), gate);
     };
     let tokens = dino.forward(&ctx, &images, Some(&mut tap));
 
-    let trunk = Trunk::load(&ctx, &weights).expect("trunk load");
+    let trunk = Trunk::load(&ctx, &weights, precision).expect("trunk load");
     let mut tap = |name: &str, t: &headshot_server::engine::tensor::GpuTensor| {
-        check(name, ctx.download(t), Gate::F32_DEEP);
+        check(name, ctx.download(t), deep_gate);
     };
     let caches = trunk.forward(&ctx, &tokens, n, h_p, w_p, Some(&mut tap));
     assert_eq!(caches.len(), 4);
@@ -115,11 +145,23 @@ fn trunk_f32_parity(scene: &str) {
 #[test]
 #[ignore = "needs local fixtures + GPU (just parity)"]
 fn parity_trunk_f32_small() {
-    trunk_f32_parity("small");
+    trunk_parity("small", Dtype::F32);
 }
 
 #[test]
 #[ignore = "needs local fixtures + GPU (just parity)"]
 fn parity_trunk_f32_realistic() {
-    trunk_f32_parity("realistic");
+    trunk_parity("realistic", Dtype::F32);
+}
+
+#[test]
+#[ignore = "needs local fixtures + GPU (just parity)"]
+fn parity_trunk_f16_small() {
+    trunk_parity("small", Dtype::F16);
+}
+
+#[test]
+#[ignore = "needs local fixtures + GPU (just parity)"]
+fn parity_trunk_f16_realistic() {
+    trunk_parity("realistic", Dtype::F16);
 }

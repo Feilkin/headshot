@@ -6,6 +6,11 @@
 // One thread per rotation pair (d, d+D/2) so the in-place update is
 // race-free.
 
+@if(f16) enable f16;
+
+@if(f16) alias Elem = f16;
+@if(!f16) alias Elem = f32;
+
 struct Params {
     s: u32,
     t: u32,
@@ -18,7 +23,7 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read_write> x: array<f32>;
+@group(0) @binding(1) var<storage, read_write> x: array<Elem>;
 @group(0) @binding(2) var<storage, read> sin_table: array<f32>;
 @group(0) @binding(3) var<storage, read> cos_table: array<f32>;
 
@@ -44,9 +49,9 @@ fn main(
     let row = (t - p.prefix) * p.d;
 
     let base = ((s * p.h + h) * p.t + t) * p.d + dp;
-    let lo = x[base];
-    let hi = x[base + half];
+    let lo = f32(x[base]);
+    let hi = f32(x[base + half]);
     // rot(x) = concat(−x[half:], x[:half])
-    x[base] = lo * cos_table[row + dp] - hi * sin_table[row + dp];
-    x[base + half] = hi * cos_table[row + half + dp] + lo * sin_table[row + half + dp];
+    x[base] = Elem(lo * cos_table[row + dp] - hi * sin_table[row + dp]);
+    x[base + half] = Elem(hi * cos_table[row + half + dp] + lo * sin_table[row + half + dp]);
 }

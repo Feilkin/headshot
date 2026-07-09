@@ -4,8 +4,9 @@
 
 use anyhow::Result;
 
-use super::upload_f32;
-use crate::engine::{GpuContext, tensor::GpuTensor};
+use super::{upload_at, upload_f32};
+use crate::engine::tensor::{Dtype, GpuTensor};
+use crate::engine::GpuContext;
 use crate::weights::Weights;
 
 pub struct Block {
@@ -44,37 +45,40 @@ pub struct Rope<'a> {
 
 impl Block {
     /// Load `{prefix}.{norm1,attn.qkv,...}` from the converted checkpoint.
+    /// GEMM weights go to `precision`; norms, biases, gammas stay f32.
     pub fn load(
         ctx: &GpuContext,
         weights: &Weights,
         prefix: &str,
         heads: usize,
         qk_norm: bool,
+        precision: Dtype,
     ) -> Result<Self> {
-        let get = |suffix: &str| upload_f32(ctx, weights, &format!("{prefix}.{suffix}"));
+        let f32t = |suffix: &str| upload_f32(ctx, weights, &format!("{prefix}.{suffix}"));
+        let gemm = |suffix: &str| upload_at(ctx, weights, &format!("{prefix}.{suffix}"), precision);
         let dim = weights.tensor(&format!("{prefix}.norm1.weight"))?.shape()[0];
         Ok(Self {
-            norm1_w: get("norm1.weight")?,
-            norm1_b: get("norm1.bias")?,
-            qkv_w: get("attn.qkv.weight")?,
-            qkv_b: get("attn.qkv.bias")?,
-            proj_w: get("attn.proj.weight")?,
-            proj_b: get("attn.proj.bias")?,
-            ls1: get("ls1.gamma")?,
-            norm2_w: get("norm2.weight")?,
-            norm2_b: get("norm2.bias")?,
-            fc1_w: get("mlp.fc1.weight")?,
-            fc1_b: get("mlp.fc1.bias")?,
-            fc2_w: get("mlp.fc2.weight")?,
-            fc2_b: get("mlp.fc2.bias")?,
-            ls2: get("ls2.gamma")?,
+            norm1_w: f32t("norm1.weight")?,
+            norm1_b: f32t("norm1.bias")?,
+            qkv_w: gemm("attn.qkv.weight")?,
+            qkv_b: f32t("attn.qkv.bias")?,
+            proj_w: gemm("attn.proj.weight")?,
+            proj_b: f32t("attn.proj.bias")?,
+            ls1: f32t("ls1.gamma")?,
+            norm2_w: f32t("norm2.weight")?,
+            norm2_b: f32t("norm2.bias")?,
+            fc1_w: gemm("mlp.fc1.weight")?,
+            fc1_b: f32t("mlp.fc1.bias")?,
+            fc2_w: gemm("mlp.fc2.weight")?,
+            fc2_b: f32t("mlp.fc2.bias")?,
+            ls2: f32t("ls2.gamma")?,
             qk_norm: qk_norm
                 .then(|| -> Result<QkNorm> {
                     Ok(QkNorm {
-                        q_w: get("attn.q_norm.weight")?,
-                        q_b: get("attn.q_norm.bias")?,
-                        k_w: get("attn.k_norm.weight")?,
-                        k_b: get("attn.k_norm.bias")?,
+                        q_w: f32t("attn.q_norm.weight")?,
+                        q_b: f32t("attn.q_norm.bias")?,
+                        k_w: f32t("attn.k_norm.weight")?,
+                        k_b: f32t("attn.k_norm.bias")?,
                     })
                 })
                 .transpose()?,

@@ -2,6 +2,11 @@
 // everywhere). Also serves per-head QK-norm (rows = S·H·T, dim = 64).
 // One 256-thread workgroup per row.
 
+@if(f16) enable f16;
+
+@if(f16) alias Elem = f16;
+@if(!f16) alias Elem = f32;
+
 struct Params {
     rows: u32,
     dim: u32,
@@ -10,10 +15,10 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(1) var<storage, read> x: array<Elem>;
 @group(0) @binding(2) var<storage, read> weight: array<f32>;
 @group(0) @binding(3) var<storage, read> bias: array<f32>;
-@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<Elem>;
 
 var<workgroup> scratch: array<f32, 256>;
 var<workgroup> mu: f32;
@@ -34,7 +39,7 @@ fn main(
 
     var partial = 0.0;
     for (var j = li; j < p.dim; j += 256u) {
-        partial += x[base + j];
+        partial += f32(x[base + j]);
     }
     scratch[li] = partial;
     workgroupBarrier();
@@ -51,7 +56,7 @@ fn main(
 
     partial = 0.0;
     for (var j = li; j < p.dim; j += 256u) {
-        let d = x[base + j] - mu;
+        let d = f32(x[base + j]) - mu;
         partial += d * d;
     }
     scratch[li] = partial;
@@ -68,6 +73,6 @@ fn main(
     workgroupBarrier();
 
     for (var j = li; j < p.dim; j += 256u) {
-        out[base + j] = (x[base + j] - mu) * inv_sigma * weight[j] + bias[j];
+        out[base + j] = Elem((f32(x[base + j]) - mu) * inv_sigma * weight[j] + bias[j]);
     }
 }

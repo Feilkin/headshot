@@ -59,6 +59,14 @@ engine (LLM kernels, composable primitives).
   f32 norms removes the overflow-prone spots. Parity harness (02 §5)
   validates the result; an all-f32 debug mode isolates kernel bugs from
   precision drift.
+- **Exception (measured 2026-07-09): DINO must not run f16.** Its residual
+  stream carries per-frame "massive activations" of ~1.4e5 from block 0
+  onward — beyond f16's 65504 max (bf16 survives on exponent range alone).
+  The final DINO norm squashes them (output max ~2) and the aggregator
+  trunk's activations stay ≤ ~165, so: DINO runs f32 (f32 GEMMs, ~0.8 s for
+  8 frames — cheap, linear in N), the trunk runs f16/WMMA, one cast at the
+  stage boundary. If a future variant needs f16 DINO, the fix is an f32
+  residual stream with f16 GEMM in/outputs, not f16 storage throughout.
 
 ## 3. Execution schedule
 

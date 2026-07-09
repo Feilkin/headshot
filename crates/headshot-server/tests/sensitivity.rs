@@ -4,6 +4,7 @@
 //! attributable to reduction-order noise.
 
 use headshot_server::engine::GpuContext;
+use headshot_server::engine::tensor::Dtype;
 use headshot_server::model::{dino::Dino, trunk::Trunk};
 use headshot_server::parity::{Dump, compare, fixtures_dir};
 use headshot_server::weights::Weights;
@@ -19,8 +20,8 @@ fn trunk_noise_amplification() {
     let (shape, images) = dump.tensor("images").unwrap();
     let [n, _, height, width] = shape[..] else { panic!() };
 
-    let dino = Dino::load(&ctx, &weights).unwrap();
-    let trunk = Trunk::load(&ctx, &weights).unwrap();
+    let dino = Dino::load(&ctx, &weights, Dtype::F32).unwrap();
+    let trunk = Trunk::load(&ctx, &weights, Dtype::F32).unwrap();
 
     let run = |imgs: &[f32]| -> BTreeMap<String, Vec<f32>> {
         let mut outs = BTreeMap::new();

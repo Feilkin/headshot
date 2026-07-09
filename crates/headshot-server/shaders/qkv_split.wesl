@@ -1,6 +1,11 @@
 // Split a fused qkv projection (S·T, 3·H·D) into head-major q, k, v
 // tensors (S, H, T, D) ready for QK-norm / RoPE / attention.
 
+@if(f16) enable f16;
+
+@if(f16) alias Elem = f16;
+@if(!f16) alias Elem = f32;
+
 struct Params {
     s: u32,
     t: u32,
@@ -9,10 +14,10 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read> qkv: array<f32>;
-@group(0) @binding(2) var<storage, read_write> q: array<f32>;
-@group(0) @binding(3) var<storage, read_write> k: array<f32>;
-@group(0) @binding(4) var<storage, read_write> v: array<f32>;
+@group(0) @binding(1) var<storage, read> qkv: array<Elem>;
+@group(0) @binding(2) var<storage, read_write> q: array<Elem>;
+@group(0) @binding(3) var<storage, read_write> k: array<Elem>;
+@group(0) @binding(4) var<storage, read_write> v: array<Elem>;
 
 @compute @workgroup_size(256)
 fn main(

@@ -2,13 +2,18 @@
 // erf via Abramowitz & Stegun 7.1.26 (max abs error ~1.5e-7 — inside the
 // all-f32 parity gates, unlike the tanh approximation).
 
+@if(f16) enable f16;
+
+@if(f16) alias Elem = f16;
+@if(!f16) alias Elem = f32;
+
 struct Params {
     total: u32,
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read> x: array<f32>;
-@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(1) var<storage, read> x: array<Elem>;
+@group(0) @binding(2) var<storage, read_write> out: array<Elem>;
 
 fn erf_approx(v: f32) -> f32 {
     let s = sign(v);
@@ -29,7 +34,7 @@ fn main(
 ) {
     let i = (wg.y * nwg.x + wg.x) * 256u + li;
     if i < p.total {
-        let v = x[i];
-        out[i] = 0.5 * v * (1.0 + erf_approx(v * 0.7071067811865475));
+        let v = f32(x[i]);
+        out[i] = Elem(0.5 * v * (1.0 + erf_approx(v * 0.7071067811865475)));
     }
 }

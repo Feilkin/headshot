@@ -6,34 +6,41 @@ use anyhow::Result;
 
 use super::block::{Block, Rope};
 use super::dino::Tap;
-use super::{read_f32, upload_f32};
-use crate::engine::{GpuContext, rope, tensor::GpuTensor};
+use super::{read_f32, upload_at};
+use crate::engine::tensor::{Dtype, GpuTensor};
+use crate::engine::{GpuContext, rope};
 use crate::weights::Weights;
 
 const PREFIX: usize = 17; // 1 camera + 16 register tokens
 const DIM: usize = 1024;
 
 pub struct Trunk {
-    camera_token: GpuTensor,   // (2, 1, 1024) — variant 0: frame 0, 1: rest
-    register_token: GpuTensor, // (2, 16, 1024)
+    camera_token: GpuTensor,   // (2, 1024) — variant 0: frame 0, 1: rest
+    register_token: GpuTensor, // (2·16, 1024)
     frame_blocks: Vec<Block>,
     inter_blocks: Vec<Block>,
     periods: Vec<f32>,
+    precision: Dtype,
 }
 
 impl Trunk {
-    pub fn load(ctx: &GpuContext, weights: &Weights) -> Result<Self> {
+    pub fn load(ctx: &GpuContext, weights: &Weights, precision: Dtype) -> Result<Self> {
         let load_blocks = |name: &str| -> Result<Vec<Block>> {
             (0..24)
-                .map(|i| Block::load(ctx, weights, &format!("aggregator.{name}.{i}"), 16, true))
+                .map(|i| {
+                    Block::load(ctx, weights, &format!("aggregator.{name}.{i}"), 16, true, precision)
+                })
                 .collect()
         };
         Ok(Self {
-            camera_token: upload_f32(ctx, weights, "aggregator.camera_token")?,
-            register_token: upload_f32(ctx, weights, "aggregator.register_token")?,
+            camera_token: upload_at(ctx, weights, "aggregator.camera_token", precision)?
+                .reshaped(&[2, DIM]),
+            register_token: upload_at(ctx, weights, "aggregator.register_token", precision)?
+                .reshaped(&[32, DIM]),
             frame_blocks: load_blocks("frame_blocks")?,
             inter_blocks: load_blocks("inter_frame_blocks")?,
             periods: read_f32(weights, "aggregator.rope_embed.periods")?,
+            precision,
         })
     }
 
@@ -54,23 +61,25 @@ impl Trunk {
     ) -> Vec<GpuTensor> {
         let p = h_p * w_p;
         assert_eq!(dino_tokens.len(), n * p * DIM);
+        // DINO always emits f32 (massive activations; see Dino::load) —
+        // cast down at the stage boundary when the trunk runs f16.
+        let cast_storage;
+        let dino_tokens = if dino_tokens.dtype != self.precision {
+            assert_eq!(self.precision, Dtype::F16, "unexpected dtype combination");
+            cast_storage = ctx.cast_to_f16(dino_tokens);
+            &cast_storage
+        } else {
+            dino_tokens
+        };
         let t = p + PREFIX;
-        let row = (DIM * 4) as u64;
 
         // assemble (N·T, 1024): camera variant + register variant + patches
-        let mut x = ctx.empty(&[n * t, DIM]);
+        let mut x = ctx.empty_typed(&[n * t, DIM], self.precision);
         for i in 0..n {
             let variant = (i != 0) as usize;
-            let dst = (i * t) as u64 * row;
-            ctx.copy(&self.camera_token, (variant * DIM * 4) as u64, &x, dst, row);
-            ctx.copy(
-                &self.register_token,
-                (variant * 16 * DIM * 4) as u64,
-                &x,
-                dst + row,
-                16 * row,
-            );
-            ctx.copy(dino_tokens, (i * p) as u64 * row, &x, dst + 17 * row, (p as u64) * row);
+            ctx.copy_rows(&self.camera_token, variant, &x, i * t, 1);
+            ctx.copy_rows(&self.register_token, variant * 16, &x, i * t + 1, 16);
+            ctx.copy_rows(dino_tokens, i * p, &x, i * t + PREFIX, p);
         }
 
         let (sin, cos) = rope::tables(&self.periods, h_p, w_p);
@@ -96,16 +105,16 @@ impl Trunk {
                 // gather the 17 prefix tokens of every frame (contiguous
                 // per frame), run the block over one sequence of N·17,
                 // scatter back; patch tokens pass through unchanged.
-                let reg = ctx.empty(&[n * PREFIX, DIM]);
+                let reg = ctx.empty_typed(&[n * PREFIX, DIM], self.precision);
                 for i in 0..n {
-                    ctx.copy(&frame_out, (i * t) as u64 * row, &reg, (i * PREFIX) as u64 * row, PREFIX as u64 * row);
+                    ctx.copy_rows(&frame_out, i * t, &reg, i * PREFIX, PREFIX);
                 }
                 let reg_out = self.inter_blocks[k].forward(ctx, &reg, 1, n * PREFIX, None);
                 if let Some(tap) = tap.as_deref_mut() {
                     tap(&format!("trunk.inter.{k:02}"), &reg_out);
                 }
                 for i in 0..n {
-                    ctx.copy(&reg_out, (i * PREFIX) as u64 * row, &frame_out, (i * t) as u64 * row, PREFIX as u64 * row);
+                    ctx.copy_rows(&reg_out, i * PREFIX, &frame_out, i * t, PREFIX);
                 }
                 x = frame_out;
             } else {

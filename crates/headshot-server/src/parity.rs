@@ -82,19 +82,22 @@ impl Gate {
     /// f16-compute trunk, per layer — watch for cliffs, not the drift.
     pub const F16_TRUNK: Gate = Gate { rel_max: None, min_cosine: Some(0.999) };
 
+    /// NaN-proof: a NaN metric always fails (an all-NaN activation once
+    /// produced max_abs 0 / cosine NaN, which naive `<` comparisons waved
+    /// through).
     pub fn check(&self, name: &str, m: Metrics) -> Result<Metrics, String> {
         if let Some(gate) = self.rel_max
-            && m.rel_max_err() > gate
+            && (m.rel_max_err() > gate || m.rel_max_err().is_nan())
         {
             return Err(format!(
-                "{name}: rel_max_err {:.3e} > {gate:.3e} ({m:?})",
+                "{name}: rel_max_err {:.3e} !<= {gate:.3e} ({m:?})",
                 m.rel_max_err()
             ));
         }
         if let Some(gate) = self.min_cosine
-            && m.cosine_sim < gate
+            && (m.cosine_sim < gate || m.cosine_sim.is_nan())
         {
-            return Err(format!("{name}: cosine_sim {:.9} < {gate:.9} ({m:?})", m.cosine_sim));
+            return Err(format!("{name}: cosine_sim {:.9} !>= {gate:.9} ({m:?})", m.cosine_sim));
         }
         Ok(m)
     }

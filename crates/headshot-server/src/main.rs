@@ -56,6 +56,12 @@ async fn main() -> Result<()> {
         };
         info!("{name}: {status}");
     }
+    for config in adapter.cooperative_matrix_properties() {
+        info!(
+            "cooperative-matrix config: {}x{}x{} {:?} -> {:?}",
+            config.m_size, config.n_size, config.k_size, config.ab_type, config.cr_type
+        );
+    }
 
     Ok(())
 }

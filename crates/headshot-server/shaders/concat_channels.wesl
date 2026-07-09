@@ -1,6 +1,11 @@
 // Channel-dim concat for the cached head inputs (doc/01 §3.3):
 // a (rows, c1) ++ b (rows, c2) → out (rows, c1+c2).
 
+@if(f16) enable f16;
+
+@if(f16) alias Elem = f16;
+@if(!f16) alias Elem = f32;
+
 struct Params {
     rows: u32,
     c1: u32,
@@ -9,9 +14,9 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read> a: array<f32>;
-@group(0) @binding(2) var<storage, read> b: array<f32>;
-@group(0) @binding(3) var<storage, read_write> out: array<f32>;
+@group(0) @binding(1) var<storage, read> a: array<Elem>;
+@group(0) @binding(2) var<storage, read> b: array<Elem>;
+@group(0) @binding(3) var<storage, read_write> out: array<Elem>;
 
 @compute @workgroup_size(256)
 fn main(

@@ -1,6 +1,11 @@
 // Merge attention heads: (S, H, T, D) → (S·T, H·D), the input layout the
 // projection GEMM expects.
 
+@if(f16) enable f16;
+
+@if(f16) alias Elem = f16;
+@if(!f16) alias Elem = f32;
+
 struct Params {
     s: u32,
     t: u32,
@@ -9,8 +14,8 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read> x: array<f32>;
-@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(1) var<storage, read> x: array<Elem>;
+@group(0) @binding(2) var<storage, read_write> out: array<Elem>;
 
 @compute @workgroup_size(256)
 fn main(

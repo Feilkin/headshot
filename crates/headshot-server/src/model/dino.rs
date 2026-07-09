@@ -3,8 +3,9 @@
 use anyhow::Result;
 
 use super::block::{Block, Rope};
-use super::{read_f32, upload_f32};
-use crate::engine::{GpuContext, rope, tensor::GpuTensor};
+use super::{read_f32, upload_at, upload_f32};
+use crate::engine::tensor::{Dtype, GpuTensor};
+use crate::engine::{GpuContext, rope};
 use crate::weights::Weights;
 
 const PREFIX: usize = 5; // 1 cls + 4 storage tokens
@@ -19,29 +20,41 @@ pub struct Dino {
     norm_w: GpuTensor,
     norm_b: GpuTensor,
     periods: Vec<f32>,
+    precision: Dtype,
 }
 
 /// Optional observer for intermediate activations (parity tests).
 pub type Tap<'a> = &'a mut dyn FnMut(&str, &GpuTensor);
 
 impl Dino {
-    pub fn load(ctx: &GpuContext, weights: &Weights) -> Result<Self> {
+    /// DINO always runs f32 regardless of the requested engine precision:
+    /// its residual stream carries per-frame "massive activations" of
+    /// ~1.4e5 (measured on the real checkpoint) which overflow f16's 65504
+    /// max — the reference survives only because bf16 keeps f32's exponent
+    /// range. The final norm squashes them (output max ~2), so the trunk
+    /// can still run f16; the caller casts at the stage boundary
+    /// ([`crate::model::trunk::Trunk::forward`] does it automatically).
+    pub fn load(ctx: &GpuContext, weights: &Weights, precision: Dtype) -> Result<Self> {
+        let _ = precision;
+        let precision = Dtype::F32;
         let p = "aggregator.patch_embed";
-        let proj_w =
-            upload_f32(ctx, weights, &format!("{p}.patch_embed.proj.weight"))?.reshaped(&[DIM, 768]);
+        let proj_w = upload_at(ctx, weights, &format!("{p}.patch_embed.proj.weight"), precision)?
+            .reshaped(&[DIM, 768]);
         let blocks = (0..24)
-            .map(|i| Block::load(ctx, weights, &format!("{p}.blocks.{i}"), 16, false))
+            .map(|i| Block::load(ctx, weights, &format!("{p}.blocks.{i}"), 16, false, precision))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             proj_w,
             proj_b: upload_f32(ctx, weights, &format!("{p}.patch_embed.proj.bias"))?,
-            cls_token: upload_f32(ctx, weights, &format!("{p}.cls_token"))?.reshaped(&[1, DIM]),
-            storage_tokens: upload_f32(ctx, weights, &format!("{p}.storage_tokens"))?
+            cls_token: upload_at(ctx, weights, &format!("{p}.cls_token"), precision)?
+                .reshaped(&[1, DIM]),
+            storage_tokens: upload_at(ctx, weights, &format!("{p}.storage_tokens"), precision)?
                 .reshaped(&[4, DIM]),
             blocks,
             norm_w: upload_f32(ctx, weights, &format!("{p}.norm.weight"))?,
             norm_b: upload_f32(ctx, weights, &format!("{p}.norm.bias"))?,
             periods: read_f32(weights, &format!("{p}.rope_embed.periods"))?,
+            precision,
         })
     }
 
@@ -63,6 +76,7 @@ impl Dino {
             images,
             headshot_shared::model::IMAGENET_MEAN,
             headshot_shared::model::IMAGENET_STD,
+            self.precision,
         );
         let embedded = ctx.linear(&cols, &self.proj_w, Some(&self.proj_b));
         if let Some(tap) = tap.as_deref_mut() {
@@ -70,35 +84,30 @@ impl Dino {
         }
 
         // assemble (N, 5+P, 1024): cls + storage + patches per frame
-        let mut x = ctx.empty(&[n * t, DIM]);
-        let row = (DIM * 4) as u64;
+        let mut x = ctx.empty_typed(&[n * t, DIM], self.precision);
         for i in 0..n {
-            let dst = (i * t) as u64 * row;
-            ctx.copy(&self.cls_token, 0, &x, dst, row);
-            ctx.copy(&self.storage_tokens, 0, &x, dst + row, 4 * row);
-            ctx.copy(&embedded, (i * p) as u64 * row, &x, dst + 5 * row, (p as u64) * row);
+            ctx.copy_rows(&self.cls_token, 0, &x, i * t, 1);
+            ctx.copy_rows(&self.storage_tokens, 0, &x, i * t + 1, 4);
+            ctx.copy_rows(&embedded, i * p, &x, i * t + PREFIX, p);
         }
 
         let (sin, cos) = rope::tables(&self.periods, h_p, w_p);
         let sin = ctx.tensor_from_slice(&[p, 64], &sin);
         let cos = ctx.tensor_from_slice(&[p, 64], &cos);
 
-        for block in &self.blocks {
+        for (i, block) in self.blocks.iter().enumerate() {
             x = block.forward(ctx, &x, n, t, Some(Rope { sin: &sin, cos: &cos, prefix: PREFIX }));
+            if let Some(tap) = tap.as_deref_mut() {
+                tap(&format!("dino.block.{i:02}"), &x);
+            }
         }
 
         let normed = ctx.layernorm(&x, &self.norm_w, &self.norm_b);
 
         // keep only the P patch tokens per frame
-        let out = ctx.empty(&[n * p, DIM]);
+        let out = ctx.empty_typed(&[n * p, DIM], self.precision);
         for i in 0..n {
-            ctx.copy(
-                &normed,
-                ((i * t + PREFIX) * DIM * 4) as u64,
-                &out,
-                (i * p * DIM * 4) as u64,
-                (p * DIM * 4) as u64,
-            );
+            ctx.copy_rows(&normed, i * t + PREFIX, &out, i * p, p);
         }
         if let Some(tap) = tap {
             tap("dino.tokens", &out);

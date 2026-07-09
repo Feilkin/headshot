@@ -4,6 +4,11 @@
 // (c, ky, kx) to match the conv weight layout (1024, 3, 16, 16); the
 // patch-embed GEMM then runs the `linear` kernel.
 
+@if(f16) enable f16;
+
+@if(f16) alias Elem = f16;
+@if(!f16) alias Elem = f32;
+
 struct Params {
     n: u32,
     height: u32,
@@ -15,7 +20,7 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> images: array<f32>;
-@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<Elem>;
 
 const PATCH: u32 = 16u;
 
@@ -46,5 +51,5 @@ fn main(
     let y = pr * PATCH + ky;
     let x = pc * PATCH + kx;
     let value = images[((n * 3u + c) * p.height + y) * p.width + x];
-    out[i] = (value - p.mean[c]) * p.inv_std[c];
+    out[i] = Elem((value - p.mean[c]) * p.inv_std[c]);
 }

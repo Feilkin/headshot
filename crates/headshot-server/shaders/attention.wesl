@@ -4,6 +4,11 @@
 // denominator — flash-attention semantics without tiling; numerically
 // f32 throughout. Tiled/WMMA variant comes with the f16 path.
 
+@if(f16) enable f16;
+
+@if(f16) alias Elem = f16;
+@if(!f16) alias Elem = f32;
+
 struct Params {
     s: u32,
     t: u32,
@@ -12,10 +17,10 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read> q: array<f32>;
-@group(0) @binding(2) var<storage, read> k: array<f32>;
-@group(0) @binding(3) var<storage, read> v: array<f32>;
-@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+@group(0) @binding(1) var<storage, read> q: array<Elem>;
+@group(0) @binding(2) var<storage, read> k: array<Elem>;
+@group(0) @binding(3) var<storage, read> v: array<Elem>;
+@group(0) @binding(4) var<storage, read_write> out: array<Elem>;
 
 const D: u32 = 64u;
 
@@ -38,7 +43,7 @@ fn main(
 
     var qv: array<f32, D>;
     for (var d = 0u; d < D; d++) {
-        qv[d] = q[q_base + d];
+        qv[d] = f32(q[q_base + d]);
     }
 
     var m = -3.4e38;
@@ -52,7 +57,7 @@ fn main(
         let k_base = seq_base + kk * D;
         var score = 0.0;
         for (var d = 0u; d < D; d++) {
-            score += qv[d] * k[k_base + d];
+            score += qv[d] * f32(k[k_base + d]);
         }
         score *= p.scale;
 
@@ -61,13 +66,13 @@ fn main(
         let e = exp(score - m_new);
         l = l * corr + e;
         for (var d = 0u; d < D; d++) {
-            acc[d] = acc[d] * corr + e * v[k_base + d];
+            acc[d] = acc[d] * corr + e * f32(v[k_base + d]);
         }
         m = m_new;
     }
 
     let inv_l = 1.0 / l;
     for (var d = 0u; d < D; d++) {
-        out[q_base + d] = acc[d] * inv_l;
+        out[q_base + d] = Elem(acc[d] * inv_l);
     }
 }

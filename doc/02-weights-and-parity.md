@@ -135,7 +135,13 @@ scale- and NaN-class bugs.
 - all-f32 debug trunk vs f32-forced dump: cosine > 1 − 1e-4 per layer,
   rel-max < 0.5 (sanity). A kernel bug shows as a cliff at one layer, not
   a gradual drift — always eyeball the per-layer trend.
-- f16-compute trunk vs bf16 dump: cosine > 0.999 per layer, no cliff.
+- f16-compute trunk vs bf16 dump: per-layer cosine, self-calibrating — our
+  divergence from the bf16 dump must stay within max(1e-3, 2× the
+  reference's own bf16↔f32 divergence at that layer). Measured: at
+  realistic-scene layer 23 the reference's bf16 run is itself 1−1.7e-3 from
+  its f32 run, the same size as our f16 drift — both are precision noise
+  through the trunk's gain, so a static 0.999 over-fails deep layers at
+  scale. No cliff, as always.
 - `pose_enc`: abs < 1e-3 per component. `depth`: relative < 1e-2 at f16,
   < 1e-3 at f32.
 

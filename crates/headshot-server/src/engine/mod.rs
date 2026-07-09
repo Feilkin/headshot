@@ -20,15 +20,23 @@ use anyhow::{Context as _, Result};
 use tensor::GpuTensor;
 use wgpu::util::DeviceExt;
 
-/// Compiled-in WGSL sources (WESL artifacts from build.rs).
+/// Compiled-in WGSL sources (WESL artifacts from build.rs). Each dual
+/// kernel has an f32 variant and an `_f16` variant (f16 storage, f32 math).
 macro_rules! kernel_sources {
     ($($name:literal),* $(,)?) => {
-        &[$(($name, include_str!(concat!(env!("OUT_DIR"), "/", $name, ".wgsl")))),*]
+        &[
+            $(
+                ($name, include_str!(concat!(env!("OUT_DIR"), "/", $name, ".wgsl"))),
+                (
+                    concat!($name, "_f16"),
+                    include_str!(concat!(env!("OUT_DIR"), "/", $name, "_f16.wgsl")),
+                ),
+            )*
+        ]
     };
 }
 
-const KERNELS: &[(&str, &str)] = kernel_sources![
-    "residual_add",
+const DUAL_KERNELS: &[(&str, &str)] = kernel_sources![
     "linear",
     "layernorm",
     "gelu",
@@ -41,11 +49,21 @@ const KERNELS: &[(&str, &str)] = kernel_sources![
     "concat_channels",
 ];
 
+const RESIDUAL_ADD: &str = include_str!(concat!(env!("OUT_DIR"), "/residual_add.wgsl"));
+const CAST_TO_F16: &str = include_str!(concat!(env!("OUT_DIR"), "/cast_f32_to_f16.wgsl"));
+/// Plain WGSL (naga cooperative-matrix extension; wgsl-parse can't parse it,
+/// so it bypasses WESL).
+const LINEAR_WMMA: &str = include_str!("../../shaders/linear_wmma.wgsl");
+
 pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pipelines: HashMap<&'static str, wgpu::ComputePipeline>,
     encoder: Mutex<Option<wgpu::CommandEncoder>>,
+    /// shader-f16 available: the f16 kernel variants exist.
+    pub f16_supported: bool,
+    /// 16x16x16 f16→f32 cooperative matrix available: `linear_wmma` exists.
+    pub wmma_supported: bool,
 }
 
 impl GpuContext {
@@ -91,24 +109,54 @@ impl GpuContext {
             ..Default::default()
         }))?;
 
-        let mut pipelines = HashMap::new();
-        for (name, source) in KERNELS {
+        let f16_supported = features.contains(wgpu::Features::SHADER_F16);
+        let wmma_supported = f16_supported
+            && features.contains(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX)
+            && adapter.cooperative_matrix_properties().iter().any(|c| {
+                (c.m_size, c.n_size, c.k_size) == (16, 16, 16)
+                    && c.ab_type == wgpu::CooperativeScalarType::F16
+                    && c.cr_type == wgpu::CooperativeScalarType::F32
+            });
+
+        let make_pipeline = |device: &wgpu::Device, name: &str, source: &str| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(name),
-                source: wgpu::ShaderSource::Wgsl((*source).into()),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
             });
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(name),
                 layout: None,
                 module: &module,
                 entry_point: Some("main"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
-            pipelines.insert(*name, pipeline);
+            })
+        };
+
+        let mut pipelines = HashMap::new();
+        for (name, source) in DUAL_KERNELS {
+            if name.ends_with("_f16") && !f16_supported {
+                continue;
+            }
+            pipelines.insert(*name, make_pipeline(&device, name, source));
+        }
+        pipelines.insert("residual_add", make_pipeline(&device, "residual_add", RESIDUAL_ADD));
+        if f16_supported {
+            pipelines
+                .insert("cast_f32_to_f16", make_pipeline(&device, "cast_f32_to_f16", CAST_TO_F16));
+        }
+        if wmma_supported {
+            pipelines.insert("linear_wmma", make_pipeline(&device, "linear_wmma", LINEAR_WMMA));
         }
 
-        Ok(Self { device, queue, pipelines, encoder: Mutex::new(None) })
+        Ok(Self {
+            device,
+            queue,
+            pipelines,
+            encoder: Mutex::new(None),
+            f16_supported,
+            wmma_supported,
+        })
     }
 
     /// Encode one compute dispatch. Convention shared by every kernel:

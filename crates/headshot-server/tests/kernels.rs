@@ -1,6 +1,7 @@
 //! Kernel unit tests vs naive CPU references on random small inputs
 //! (M1 CI gate — runs without the checkpoint; skips without a GPU).
 
+use headshot_server::engine::tensor::Dtype;
 use headshot_server::engine::{GpuContext, rope};
 
 /// Deterministic light-weight RNG (SplitMix64 → uniform in [-1, 1]).
@@ -275,7 +276,12 @@ fn im2col_and_concat() {
         .collect();
     let mean = [0.485, 0.456, 0.406];
     let std = [0.229, 0.224, 0.225];
-    let out = ctx.im2col_patch(&ctx.tensor_from_slice(&[n, 3, height, width], &images), mean, std);
+    let out = ctx.im2col_patch(
+        &ctx.tensor_from_slice(&[n, 3, height, width], &images),
+        mean,
+        std,
+        Dtype::F32,
+    );
     assert_eq!(out.shape, vec![n * 2, 768]);
     let got = ctx.download(&out);
     // spot-check patch (n=1, pr=1, pc=0), c=2, ky=3, kx=7
@@ -295,4 +301,94 @@ fn im2col_and_concat() {
     let got = ctx.download(&cat);
     let want = [a[0], a[1], b[0], b[1], b[2], a[2], a[3], b[3], b[4], b[5], a[4], a[5], b[6], b[7], b[8]];
     assert_close(&got, &want, 0.0, "concat");
+}
+
+#[test]
+fn linear_f16_and_wmma_match_cpu() {
+    let Some(ctx) = ctx() else { return };
+    if !ctx.f16_supported {
+        eprintln!("no shader-f16 — skipping");
+        return;
+    }
+    let mut rng = Rng(8);
+    // M deliberately not a multiple of 16 (exercises padded-slack loads and
+    // bounds-checked stores); K % 16 == 0, N % 64 == 0 for the WMMA path.
+    let (m, k, n) = (37, 96, 128);
+    let x: Vec<f32> = rng.vec(m * k);
+    let w: Vec<f32> = rng.vec(n * k);
+    let b: Vec<f32> = rng.vec(n);
+
+    // CPU reference on the f16-rounded inputs (what the GPU actually sees),
+    // accumulated in f64.
+    let round = |v: &f32| half::f16::from_f32(*v).to_f32();
+    let xr: Vec<f32> = x.iter().map(round).collect();
+    let wr: Vec<f32> = w.iter().map(round).collect();
+    let mut expected = vec![0.0f32; m * n];
+    for row in 0..m {
+        for col in 0..n {
+            let mut acc = 0.0f64;
+            for kk in 0..k {
+                acc += xr[row * k + kk] as f64 * wr[col * k + kk] as f64;
+            }
+            // output is stored f16
+            expected[row * n + col] =
+                half::f16::from_f32(acc as f32 + b[col]).to_f32();
+        }
+    }
+
+    let gx = ctx.tensor_from_f32(&[m, k], &x, Dtype::F16);
+    let gw = ctx.tensor_from_f32(&[n, k], &w, Dtype::F16);
+    let gb = ctx.tensor_from_slice(&[n], &b);
+
+    // The public `linear` picks WMMA when available (dims allow it here).
+    let out = ctx.linear(&gx, &gw, Some(&gb));
+    let got = ctx.download(&out);
+    let path = if ctx.wmma_supported { "wmma" } else { "scalar f16" };
+    // f16 output rounding dominates: one ulp at |acc| ~ 6 is ~6e-3.
+    assert_close(&got, &expected, 1e-2, &format!("linear ({path})"));
+
+    // Force the scalar f16 kernel via a WMMA-ineligible N (not mult of 64).
+    let n2 = 48;
+    let gw2 = ctx.tensor_from_f32(&[n2, k], &w[..n2 * k], Dtype::F16);
+    let out2 = ctx.linear(&gx, &gw2, None);
+    let got2 = ctx.download(&out2);
+    let mut expected2 = vec![0.0f32; m * n2];
+    for row in 0..m {
+        for col in 0..n2 {
+            let mut acc = 0.0f64;
+            for kk in 0..k {
+                acc += xr[row * k + kk] as f64 * wr[col * k + kk] as f64;
+            }
+            expected2[row * n2 + col] = half::f16::from_f32(acc as f32).to_f32();
+        }
+    }
+    // tolerance is relative: 1 f16 ulp ≈ 1e-3 of magnitude
+    assert_close(&got2, &expected2, 2e-3, "linear (scalar f16)");
+}
+
+#[test]
+fn attention_f16_matches_f32() {
+    let Some(ctx) = ctx() else { return };
+    if !ctx.f16_supported {
+        eprintln!("no shader-f16 — skipping");
+        return;
+    }
+    let mut rng = Rng(9);
+    let (s, h, t, d) = (1, 2, 33, 64);
+    let q = rng.vec(s * h * t * d);
+    let k = rng.vec(s * h * t * d);
+    let v = rng.vec(s * h * t * d);
+
+    let f32_out = ctx.download(&ctx.attention(
+        &ctx.tensor_from_slice(&[s, h, t, d], &q),
+        &ctx.tensor_from_slice(&[s, h, t, d], &k),
+        &ctx.tensor_from_slice(&[s, h, t, d], &v),
+    ));
+    let f16_out = ctx.download(&ctx.attention(
+        &ctx.tensor_from_f32(&[s, h, t, d], &q, Dtype::F16),
+        &ctx.tensor_from_f32(&[s, h, t, d], &k, Dtype::F16),
+        &ctx.tensor_from_f32(&[s, h, t, d], &v, Dtype::F16),
+    ));
+    // inputs rounded to f16 + f16 output rounding; values are O(0.3)
+    assert_close(&f16_out, &f32_out, 5e-3, "attention f16 vs f32");
 }
