@@ -4,8 +4,12 @@ Milestone gate (doc/README M3): "bevy viewer renders the golden scene
 progressively with working confidence-percentile and per-source filters
 (manual checklist, recorded)."
 
-Setup: `headshot-server` running with converted weights; then
-`headshot-client <frames-dir>`. Record date, scene, and pass/fail per item.
+Setup: `headshot-server` running with converted weights on the GPU box
+(`--listen 0.0.0.0:9276` — the box is headless, so the viewer runs on
+another machine); then `headshot-client <frames-dir> --server
+<box-ip>:9276` on a machine with a display. The frames dir must exist on
+the *client* machine (the client preprocesses and uploads). Record date,
+scene, and pass/fail per item.
 
 | # | Check | Expected |
 |---|---|---|

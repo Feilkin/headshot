@@ -21,12 +21,41 @@ never enter this repo).
 `tools/` holds the standalone Python scripts for weight conversion and
 reference activation dumps (doc/02).
 
+## Status
+
+M0–M3 complete: weight conversion + parity harness, the full WGSL engine
+(f32 debug + f16/WMMA fast path, both parity-green against the reference),
+camera + dense heads, and the client/server split. Remaining milestones:
+M4a capture preprocessing (D-Log/RAW/keyframes/SRT), M4b GPS metric scale;
+perf follow-ups tracked in-session (wave-level attention, buffer pool).
+
+## Running
+
+One-time: download `vggt_omega_1b_512.pt` from Hugging Face (FAIR license),
+then `just tools-venv && just convert <ckpt>` (and `just dump <ckpt>` for
+the parity suite).
+
+```sh
+# offline: photos in, PLY out
+cargo run --release -p headshot-server --bin reconstruct -- <frames-dir> -o scene.ply
+
+# server (Strix Halo box); 0.0.0.0 to accept LAN clients
+cargo run --release -p headshot-server -- --listen 0.0.0.0:9276
+
+# viewer (any machine; needs a display)
+cargo run --release -p headshot-client -- <frames-dir> --server <box-ip>:9276
+```
+
+Viewer controls: drag = orbit, wheel = zoom, `[`/`]` = confidence
+percentile, `G` = frame groups, `F` = frusta. `--headless` runs the session
+without a window. Manual viewer checklist: doc/m3-viewer-checklist.md.
+
 ## Building & testing
 
 ```sh
 cargo build --workspace
 cargo nextest run --workspace   # CI suite (no checkpoint needed)
-just parity                     # parity suite; needs locally generated fixtures (doc/02 §5)
+just parity                     # parity + integration suite; needs local fixtures (doc/02 §5)
 ```
 
 Requires Rust 1.95+, [cargo-nextest](https://nexte.st), and optionally
