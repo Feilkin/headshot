@@ -86,6 +86,10 @@ impl GpuContext {
         limits.max_buffer_size = adapter_limits.max_buffer_size;
         limits.max_storage_buffers_per_shader_stage =
             adapter_limits.max_storage_buffers_per_shader_stage;
+        // flash attention stages 64x64 K and V tiles in workgroup memory
+        // (32 KiB > the 16 KiB WebGPU default)
+        limits.max_compute_workgroup_storage_size =
+            adapter_limits.max_compute_workgroup_storage_size;
 
         let mut features = wgpu::Features::empty();
         for wanted in [

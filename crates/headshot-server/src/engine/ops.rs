@@ -231,13 +231,15 @@ impl GpuContext {
         );
     }
 
-    /// Non-causal SDPA over head-major q, k, v (S, H, T, 64); softmax
-    /// statistics and accumulation in f32.
+    /// Non-causal flash attention over head-major q, k, v (S, H, T, 64);
+    /// softmax statistics and accumulation in f32. Workgroup-tiled: grid is
+    /// (query tiles of 64, S·H).
     pub fn attention(&self, q: &GpuTensor, k: &GpuTensor, v: &GpuTensor) -> GpuTensor {
         let [s, h, t, d] = q.shape[..] else { panic!("attention wants (S,H,T,D)") };
         assert_eq!(d, 64, "attention kernel is specialized to head_dim 64");
         assert_eq!(q.shape, k.shape);
         assert_eq!(q.shape, v.shape);
+        assert!(s * h <= 65535, "attention grid y overflow");
         let out = self.empty_typed(&q.shape, q.dtype);
         let params = AttentionParams {
             s: s as u32,
@@ -249,7 +251,7 @@ impl GpuContext {
             variant("attention", "attention_f16", q.dtype),
             bytemuck::bytes_of(&params),
             &[q, k, v, &out],
-            grid_2d((s * h * t) as u64, 64),
+            [t.div_ceil(64) as u32, (s * h) as u32, 1],
         );
         out
     }

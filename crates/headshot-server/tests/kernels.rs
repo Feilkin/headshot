@@ -184,8 +184,16 @@ fn rope_apply_matches_cpu() {
 #[test]
 fn attention_matches_cpu() {
     let Some(ctx) = ctx() else { return };
-    let mut rng = Rng(5);
-    let (s, h, t, d) = (2, 3, 17, 64);
+    // 17: one partial tile; 64: exactly one tile; 150: three tiles with a
+    // partial tail (BR = BC = 64 in the kernel)
+    for t in [17, 64, 150] {
+        attention_case(&ctx, t);
+    }
+}
+
+fn attention_case(ctx: &GpuContext, t: usize) {
+    let mut rng = Rng(5 + t as u64);
+    let (s, h, d) = (2, 3, 64);
     let q = rng.vec(s * h * t * d);
     let k = rng.vec(s * h * t * d);
     let v = rng.vec(s * h * t * d);
