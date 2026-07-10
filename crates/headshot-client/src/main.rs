@@ -1,66 +1,105 @@
-//! headshot viewer (doc/05 §4): drives a reconstruction session against
-//! the server and renders the point cloud progressively as depth chunks
-//! stream in. Filters (confidence percentile, frame groups) re-filter from
-//! CPU-side chunk data without re-inference.
+//! headshot client (doc/05): capture GUI (drop media → review keyframes →
+//! reconstruct) and progressive point-cloud viewer. With a media path on
+//! the command line it runs the automatic CLI flow (M3-compatible);
+//! without one it opens the Setup screen.
 //!
-//! Controls: drag = orbit, wheel = zoom, `[`/`]` = confidence percentile,
-//! `G` = cycle frame groups (all / even / odd), `F` = toggle frusta.
+//! Viewer controls: drag = orbit, wheel = zoom, `[`/`]` = confidence
+//! percentile, `G` = cycle frame groups (all / even / odd), `F` = frusta.
 
 mod session;
+mod ui;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::feathers::FeathersPlugins;
+use bevy::feathers::dark_theme::create_dark_theme;
+use bevy::feathers::theme::UiTheme;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::mesh::PrimitiveTopology;
 use clap::Parser;
-use crossbeam_channel::Receiver;
 use headshot_shared::pose::Camera as PoseCamera;
 use session::{ChunkPoints, SessionConfig, ViewerEvent};
 
-/// Progressive point-cloud viewer for a reconstruction session.
+/// Capture GUI + progressive point-cloud viewer for reconstruction
+/// sessions.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
-    /// Directory of JPEG/PNG frames.
-    frames_dir: std::path::PathBuf,
+    /// Mixed media: a directory (searched recursively) of videos, photos
+    /// and sidecar .srt telemetry, or a single file (doc/05 §1). Omit to
+    /// open the interactive Setup screen.
+    media: Option<std::path::PathBuf>,
 
     /// Server address.
     #[arg(long, default_value = "127.0.0.1:9276")]
     server: String,
 
-    /// Cap on frame count.
-    #[arg(long, default_value_t = 64)]
-    max_frames: usize,
+    /// Total keyframe budget across all sources (doc/05 §2; server cost is
+    /// quadratic in frame count).
+    #[arg(long, default_value_t = 200)]
+    budget: usize,
+
+    /// Official DJI D-Log→Rec.709 .cube LUT, applied to video frames.
+    #[arg(long)]
+    dlog_lut: Option<std::path::PathBuf>,
+
+    /// Tonemap video frames with the parametric D-Log approximation
+    /// (no .cube available; doc/05 §1.1).
+    #[arg(long)]
+    dlog: bool,
+
+    /// Write the preprocessed keyframes + manifest.json to this directory.
+    #[arg(long)]
+    dump_keyframes: Option<std::path::PathBuf>,
 
     /// 3×3 relative depth-jump threshold (doc/01 §5.3).
     #[arg(long, default_value_t = 0.03)]
     edge_threshold: f32,
 
     /// Run the session and print events without opening a window
-    /// (debugging / display-less smoke test).
+    /// (debugging / display-less smoke test; requires a media path).
     #[arg(long)]
     headless: bool,
+
+    /// With a media path: open the Setup/Review UI pre-populated instead
+    /// of reconstructing immediately (also the workaround for Wayland,
+    /// where drag & drop can't reach the window).
+    #[arg(long)]
+    review: bool,
 }
 
 #[derive(Resource)]
-struct Events(Receiver<ViewerEvent>);
-
-#[derive(Resource, Default)]
-struct Scene {
-    chunks: Vec<ChunkPoints>,
-    chunk_entities: Vec<Entity>,
-    cameras: Vec<PoseCamera>,
+pub struct Scene {
+    pub chunks: Vec<ChunkPoints>,
+    pub chunk_entities: Vec<Entity>,
+    pub cameras: Vec<PoseCamera>,
     /// Confidence quantile dropped (0.3 keeps the top 70 %).
-    conf_quantile: f32,
-    conf_threshold: f32,
-    frame_group: FrameGroup,
-    show_frusta: bool,
-    dirty: bool,
-    status: String,
+    pub conf_quantile: f32,
+    pub conf_threshold: f32,
+    pub frame_group: FrameGroup,
+    pub show_frusta: bool,
+    pub dirty: bool,
+    pub status: String,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            chunks: Vec::new(),
+            chunk_entities: Vec::new(),
+            cameras: Vec::new(),
+            conf_quantile: 0.3,
+            conf_threshold: 0.0,
+            frame_group: FrameGroup::All,
+            show_frusta: true,
+            dirty: false,
+            status: String::new(),
+        }
+    }
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]
-enum FrameGroup {
+pub enum FrameGroup {
     #[default]
     All,
     Even,
@@ -84,6 +123,21 @@ impl FrameGroup {
     }
 }
 
+/// Route one session event into the point-cloud scene (shared by the CLI
+/// forwarder and the GUI worker pump).
+pub fn apply_viewer_event(scene: &mut Scene, event: ViewerEvent) {
+    match event {
+        ViewerEvent::Status(s) => scene.status = s,
+        ViewerEvent::Cameras(cams) => scene.cameras = cams,
+        ViewerEvent::Chunk(chunk) => {
+            scene.chunks.push(chunk);
+            scene.dirty = true;
+        }
+        ViewerEvent::Done => {}
+        ViewerEvent::Failed(e) => scene.status = format!("FAILED: {e}"),
+    }
+}
+
 #[derive(Component)]
 struct ChunkMesh;
 
@@ -100,49 +154,95 @@ struct Orbit {
 
 fn main() {
     let args = Args::parse();
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let config = SessionConfig {
-        server: args.server,
-        frames_dir: args.frames_dir,
-        max_frames: args.max_frames,
+    let settings = ui::SessionSettings {
+        server: args.server.clone(),
         edge_threshold: args.edge_threshold,
+        dump_keyframes: args.dump_keyframes.clone(),
     };
-    std::thread::spawn(move || session::run(config, tx));
 
-    if args.headless {
-        for event in rx.iter() {
-            match event {
-                ViewerEvent::Status(s) => println!("status: {s}"),
-                ViewerEvent::Cameras(cams) => println!("cameras: {}", cams.len()),
-                ViewerEvent::Chunk(c) => println!("chunk: {} points", c.positions.len()),
-                ViewerEvent::Done => {
-                    println!("done");
-                    return;
-                }
-                ViewerEvent::Failed(e) => {
-                    eprintln!("failed: {e}");
-                    std::process::exit(1);
+    // one unified event stream feeds the app in both modes
+    let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+    let (evt_tx, evt_rx) = crossbeam_channel::unbounded();
+
+    let mut preset = ui::setup::SetupState {
+        budget: args.budget,
+        dlog_lut: args.dlog_lut.clone(),
+        dlog_parametric: args.dlog,
+        ..Default::default()
+    };
+
+    let auto_media = if args.review { None } else { args.media.clone() };
+    let initial = if let Some(media) = auto_media {
+        // automatic flow: capture + session start immediately (M3 CLI)
+        let config = SessionConfig {
+            server: args.server,
+            media,
+            budget: args.budget,
+            dlog_lut: args.dlog_lut,
+            dlog: args.dlog,
+            dump_keyframes: args.dump_keyframes,
+            edge_threshold: args.edge_threshold,
+        };
+        let (vtx, vrx) = crossbeam_channel::unbounded();
+        std::thread::spawn(move || session::run(config, vtx));
+
+        if args.headless {
+            for event in vrx.iter() {
+                match event {
+                    ViewerEvent::Status(s) => println!("status: {s}"),
+                    ViewerEvent::Cameras(cams) => println!("cameras: {}", cams.len()),
+                    ViewerEvent::Chunk(c) => println!("chunk: {} points", c.positions.len()),
+                    ViewerEvent::Done => {
+                        println!("done");
+                        return;
+                    }
+                    ViewerEvent::Failed(e) => {
+                        eprintln!("failed: {e}");
+                        std::process::exit(1);
+                    }
                 }
             }
+            return;
         }
-        return;
-    }
+        let fwd = evt_tx.clone();
+        std::thread::spawn(move || {
+            for e in vrx.iter() {
+                let _ = fwd.send(ui::worker::Event::Viewer(e));
+            }
+        });
+        ui::Screen::Session
+    } else {
+        if args.headless {
+            eprintln!("--headless requires a media path (and is incompatible with --review)");
+            std::process::exit(2);
+        }
+        if let Some(media) = args.media {
+            preset.paths.push(media);
+        }
+        ui::Screen::Setup
+    };
+
+    // GUI worker (drives scans + reconstructions; idle in automatic mode)
+    std::thread::spawn(move || ui::worker::run(cmd_rx, evt_tx));
 
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window { title: "headshot".into(), ..default() }),
             ..default()
         }))
-        .insert_resource(Events(rx))
-        .insert_resource(Scene {
-            conf_quantile: 0.3,
-            show_frusta: true,
-            ..Default::default()
-        })
+        .add_plugins(FeathersPlugins)
+        .insert_resource(UiTheme(create_dark_theme()))
+        .insert_resource(ui::WorkerTx(cmd_tx))
+        .insert_resource(ui::WorkerRx(evt_rx))
+        .insert_resource(settings)
+        .insert_resource(preset)
+        .insert_resource(Scene::default())
+        .insert_state(initial)
+        .add_plugins(ui::CaptureUiPlugin)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            (poll_events, keyboard, rebuild_meshes, orbit_camera, draw_frusta, update_status),
+            (keyboard, rebuild_meshes, orbit_camera, draw_frusta, update_status),
         )
         .run();
 }
@@ -155,24 +255,10 @@ fn setup(mut commands: Commands) {
     ));
     commands.spawn((
         StatusText,
-        Text::new("connecting…"),
+        Text::new("ready"),
         Node { position_type: PositionType::Absolute, left: Val::Px(8.0), top: Val::Px(8.0), ..default() },
+        GlobalZIndex(10),
     ));
-}
-
-fn poll_events(mut scene: ResMut<Scene>, events: Res<Events>) {
-    for event in events.0.try_iter() {
-        match event {
-            ViewerEvent::Status(s) => scene.status = s,
-            ViewerEvent::Cameras(cams) => scene.cameras = cams,
-            ViewerEvent::Chunk(chunk) => {
-                scene.chunks.push(chunk);
-                scene.dirty = true;
-            }
-            ViewerEvent::Done => {}
-            ViewerEvent::Failed(e) => scene.status = format!("FAILED: {e}"),
-        }
-    }
 }
 
 fn keyboard(mut scene: ResMut<Scene>, keys: Res<ButtonInput<KeyCode>>) {

@@ -9,10 +9,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use crossbeam_channel::Sender;
 use half::f16;
+use headshot_capture::keyframe::SelectParams;
+use headshot_capture::video::FfmpegCli;
+use headshot_capture::{CaptureConfig, prepare_session};
 use headshot_shared::filter::depth_edge_mask;
 use headshot_shared::pose::Camera;
 use headshot_shared::protocol::{Message, Stage};
-use headshot_shared::sizing;
 
 /// One depth chunk, unprojected and edge-filtered. Confidence and frame id
 /// ride along so the viewer can re-filter interactively without
@@ -34,8 +36,17 @@ pub enum ViewerEvent {
 
 pub struct SessionConfig {
     pub server: String,
-    pub frames_dir: PathBuf,
-    pub max_frames: usize,
+    /// Mixed media directory (videos + photos + sidecar .srt) or a single
+    /// file (doc/05 §1).
+    pub media: PathBuf,
+    /// Total keyframe budget across all sources (doc/05 §2).
+    pub budget: usize,
+    /// Official D-Log→Rec.709 `.cube`; video frames only.
+    pub dlog_lut: Option<PathBuf>,
+    /// Parametric D-Log fallback when no `.cube` is available.
+    pub dlog: bool,
+    /// Debug dump of the preprocessed keyframes + manifest.
+    pub dump_keyframes: Option<PathBuf>,
     pub edge_threshold: f32,
 }
 
@@ -46,47 +57,47 @@ pub fn run(config: SessionConfig, tx: Sender<ViewerEvent>) {
 }
 
 fn run_inner(config: &SessionConfig, tx: &Sender<ViewerEvent>) -> Result<()> {
-    // ---- preprocess (doc/05 §3; same math as the reconstruct CLI) ----
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&config.frames_dir)
-        .with_context(|| format!("reading {}", config.frames_dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
-                Some("jpg" | "jpeg" | "png")
-            )
-        })
-        .collect();
-    paths.sort();
-    anyhow::ensure!(!paths.is_empty(), "no frames in {}", config.frames_dir.display());
-    paths.truncate(config.max_frames);
-    let n = paths.len();
+    // ---- capture preprocessing (doc/05 §§1–3) ----
+    let prepared = prepare_session(
+        &CaptureConfig {
+            media: vec![config.media.clone()],
+            budget: config.budget,
+            dlog_lut: config.dlog_lut.clone(),
+            dlog_parametric: config.dlog,
+            params: SelectParams { budget: config.budget, ..Default::default() },
+        },
+        &FfmpegCli::default(),
+        &mut |msg| {
+            let _ = tx.send(ViewerEvent::Status(msg));
+        },
+    )
+    .with_context(|| format!("preparing session from {}", config.media.display()))?;
+    if let Some(dir) = &config.dump_keyframes {
+        prepared.dump(dir)?;
+        tx.send(ViewerEvent::Status(format!("dumped keyframes to {}", dir.display())))?;
+    }
+    run_protocol(prepared, &config.server, config.edge_threshold, tx)
+}
 
-    let first = image::open(&paths[0])?;
-    let (_, _, tw, th) = sizing::target_size(first.width(), first.height());
-    let session_aspect = th as f32 / tw as f32;
+/// Drive a reconstruction session (doc/04) for an already-prepared frame
+/// batch: upload, reconstruct, unproject streamed depth chunks. Shared by
+/// the CLI path and the GUI worker.
+pub fn run_protocol(
+    prepared: headshot_capture::PreparedSession,
+    server: &str,
+    edge_threshold: f32,
+    tx: &Sender<ViewerEvent>,
+) -> Result<()> {
+    let (tw, th) = (prepared.width, prepared.height);
     let (width, height) = (tw as usize, th as usize);
     let px = width * height;
-    tx.send(ViewerEvent::Status(format!("preprocessing {n} frames → {tw}x{th}")))?;
-
-    let mut rgb_frames: Vec<Vec<u8>> = Vec::with_capacity(n);
-    for (i, path) in paths.iter().enumerate() {
-        let img = if i == 0 { first.clone() } else { image::open(path)? };
-        let (cw, ch) = sizing::crop_to_aspect(img.width(), img.height(), session_aspect);
-        let cropped = img.crop_imm((img.width() - cw) / 2, (img.height() - ch) / 2, cw, ch);
-        let resized = image::imageops::resize(
-            &cropped.to_rgb8(),
-            tw,
-            th,
-            image::imageops::FilterType::Lanczos3,
-        );
-        rgb_frames.push(resized.into_raw());
-    }
+    let rgb_frames = prepared.frames;
+    let n = rgb_frames.len();
 
     // ---- session (doc/04) ----
     let session_id = std::process::id() as u64;
-    let mut s = TcpStream::connect(&config.server)
-        .with_context(|| format!("connecting to {}", config.server))?;
+    let mut s =
+        TcpStream::connect(server).with_context(|| format!("connecting to {server}"))?;
     Message::OpenSession {
         session_id,
         n_frames: n as u32,
@@ -132,7 +143,7 @@ fn run_inner(config: &SessionConfig, tx: &Sender<ViewerEvent>) -> Result<()> {
                     height,
                     &depth,
                     &conf,
-                    config.edge_threshold,
+                    edge_threshold,
                 );
                 tx.send(ViewerEvent::Chunk(chunk))?;
             }

@@ -11,10 +11,16 @@ repository.workspace = true
 anyhow.workspace = true
 # No `audio`: the viewer is silent and bevy_audio's cpal/alsa-sys needs
 # system ALSA dev libs we don't want to depend on.
-bevy = { version = "0.19", default-features = false, features = ["3d", "ui"] }
+bevy = { version = "0.19", default-features = false, features = [
+    "3d",
+    "ui",
+    # capture UI: feathers widgets + app states
+    "bevy_feathers",
+    "bevy_state",
+] }
 bytemuck.workspace = true
 clap.workspace = true
 crossbeam-channel = "0.5.16"
 half.workspace = true
+headshot-capture.workspace = true
 headshot-shared.workspace = true
-image = "0.25.10"
