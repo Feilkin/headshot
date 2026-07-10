@@ -21,6 +21,7 @@ conventions are written out here.
 | [04-pipeline-protocol.md](04-pipeline-protocol.md) | End-to-end stage graph: what streams, what blocks, client/server message schema |
 | [05-client.md](05-client.md) | Client-side preprocessing: decode, tonemapping (D-Log, RAW), keyframe selection, resize/crop math (must match reference exactly), SRT telemetry parsing, bevy visualization |
 | [06-scale-and-output.md](06-scale-and-output.md) | Unprojection, confidence/edge filtering, GPS Sim(3) metric-scale alignment, output formats |
+| [07-capture-ui.md](07-capture-ui.md) | Capture UI architecture (bevy feathers): screens, worker protocol, theming targets, follow-up list |
 
 ## Reference materials
 

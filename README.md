@@ -23,10 +23,12 @@ reference activation dumps (doc/02).
 
 ## Status
 
-M0–M3 complete: weight conversion + parity harness, the full WGSL engine
+M0–M4a complete: weight conversion + parity harness, the full WGSL engine
 (f32 debug + f16/WMMA fast path, both parity-green against the reference),
-camera + dense heads, and the client/server split. Remaining milestones:
-M4a capture preprocessing (D-Log/RAW/keyframes/SRT), M4b GPS metric scale;
+camera + dense heads, the client/server split, and capture preprocessing
+(video decode, D-Log tonemapping, RAW development, keyframe selection, SRT
+telemetry) with an interactive capture UI (doc/07). Remaining: M4b GPS
+metric scale; a UI theming pass is in progress (doc/07 lists follow-ups);
 perf follow-ups tracked in-session (wave-level attention, buffer pool).
 
 ## Running
