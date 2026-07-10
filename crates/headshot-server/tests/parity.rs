@@ -12,7 +12,7 @@
 use headshot_server::engine::GpuContext;
 use headshot_server::engine::tensor::Dtype;
 use headshot_server::model::{
-    camera_head::CameraHead, dense_head::DenseHead, dino::Dino, trunk::Trunk,
+    cache::Cache, camera_head::CameraHead, dense_head::DenseHead, dino::Dino, trunk::Trunk,
 };
 use headshot_server::parity::{Dump, Gate, compare, fixtures_dir};
 use headshot_server::weights::Weights;
@@ -251,7 +251,7 @@ fn heads_isolated(scene: &str) {
     let load_cache = |name: &str| {
         let (shape, data) = dump.tensor(name).unwrap();
         let rows: usize = shape[..shape.len() - 1].iter().product();
-        ctx.tensor_from_slice(&[rows, 2048], &data)
+        Cache::from_tensor(ctx.tensor_from_slice(&[rows, 2048], &data), n)
     };
     let caches: Vec<_> =
         ["cache.04", "cache.11", "cache.17", "cache.23"].map(load_cache).into();

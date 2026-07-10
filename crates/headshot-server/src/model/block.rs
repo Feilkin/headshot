@@ -12,8 +12,11 @@ use crate::weights::Weights;
 pub struct Block {
     norm1_w: GpuTensor,
     norm1_b: GpuTensor,
-    qkv_w: GpuTensor,
-    qkv_b: GpuTensor,
+    // qkv projection split per-output (q, k, v): three (H·D, C) GEMMs instead
+    // of one fused (3·H·D, C), so the fused activation — which overflows
+    // wgpu's 2 GiB buffer cap at high frame counts — is never materialized.
+    qkv_w: [GpuTensor; 3],
+    qkv_b: [GpuTensor; 3],
     proj_w: GpuTensor,
     proj_b: GpuTensor,
     ls1: GpuTensor,
@@ -43,6 +46,16 @@ pub struct Rope<'a> {
     pub prefix: usize,
 }
 
+/// Copy leading-dimension rows `[start, start + count)` of `src` into a fresh
+/// tensor of the same row width and dtype. Recorded into the open encoder —
+/// callers flush before the source drops.
+fn slice_leading(ctx: &GpuContext, src: &GpuTensor, start: usize, count: usize) -> GpuTensor {
+    let cols = *src.shape.last().unwrap();
+    let out = ctx.empty_typed(&[count, cols], src.dtype);
+    ctx.copy_rows(src, start, &out, 0, count);
+    out
+}
+
 impl Block {
     /// Load `{prefix}.{norm1,attn.qkv,...}` from the converted checkpoint.
     /// GEMM weights go to `precision`; norms, biases, gammas stay f32.
@@ -57,11 +70,23 @@ impl Block {
         let f32t = |suffix: &str| upload_f32(ctx, weights, &format!("{prefix}.{suffix}"));
         let gemm = |suffix: &str| upload_at(ctx, weights, &format!("{prefix}.{suffix}"), precision);
         let dim = weights.tensor(&format!("{prefix}.norm1.weight"))?.shape()[0];
+
+        // Split the fused qkv projection into independent q/k/v GEMMs. The
+        // checkpoint stores weight (3·H·D, C) and bias (3·H·D) as q|k|v
+        // stacked along the output rows, so each third is a contiguous slice.
+        let qkv_w_fused = gemm("attn.qkv.weight")?;
+        let qkv_b_fused = f32t("attn.qkv.bias")?.reshaped(&[3, dim]);
+        let qkv_w = std::array::from_fn(|i| slice_leading(ctx, &qkv_w_fused, i * dim, dim));
+        let qkv_b = std::array::from_fn(|i| slice_leading(ctx, &qkv_b_fused, i, 1).reshaped(&[dim]));
+        // The slices are recorded copies; submit them before the fused source
+        // buffers drop at the end of this function.
+        ctx.flush();
+
         Ok(Self {
             norm1_w: f32t("norm1.weight")?,
             norm1_b: f32t("norm1.bias")?,
-            qkv_w: gemm("attn.qkv.weight")?,
-            qkv_b: f32t("attn.qkv.bias")?,
+            qkv_w,
+            qkv_b,
             proj_w: gemm("attn.proj.weight")?,
             proj_b: f32t("attn.proj.bias")?,
             ls1: f32t("ls1.gamma")?,
@@ -101,8 +126,11 @@ impl Block {
         let (h, d) = (self.heads, self.head_dim);
 
         let normed = ctx.layernorm(x, &self.norm1_w, &self.norm1_b);
-        let qkv = ctx.linear(&normed, &self.qkv_w, Some(&self.qkv_b));
-        let [q, k, v] = ctx.qkv_split(&qkv, s, t, h, d);
+        // project q, k, v independently, then reshape each to head-major
+        let [q, k, v] = std::array::from_fn(|i| {
+            let proj = ctx.linear(&normed, &self.qkv_w[i], Some(&self.qkv_b[i]));
+            ctx.split_heads(&proj, s, t, h, d)
+        });
 
         // QK-norm (LayerNorm over head_dim), before RoPE (doc/01 §3.2)
         let (q, k) = match &self.qk_norm {
@@ -123,12 +151,44 @@ impl Block {
         let x1 = ctx.residual_ls(x, &proj, &self.ls1);
 
         let normed2 = ctx.layernorm(&x1, &self.norm2_w, &self.norm2_b);
-        let hidden = ctx.linear(&normed2, &self.fc1_w, Some(&self.fc1_b));
-        let act = ctx.gelu(&hidden);
-        let mlp = ctx.linear(&act, &self.fc2_w, Some(&self.fc2_b));
+        let mlp = self.mlp(ctx, &normed2);
         let out = ctx.residual_ls(&x1, &mlp, &self.ls2);
 
         ctx.flush();
         out
+    }
+
+    /// `fc2(gelu(fc1(x)))`. The hidden activation `(rows, 4·C)` grows with the
+    /// token count and is the widest buffer in the network; at high frame
+    /// counts it exceeds wgpu's `max_buffer_size` (2 GiB on many drivers). The
+    /// MLP is row-independent, so stream the tokens through it in chunks small
+    /// enough that every intermediate fits — numerically identical to the
+    /// unchunked path. Small inputs take the single-shot path unchanged.
+    fn mlp(&self, ctx: &GpuContext, normed: &GpuTensor) -> GpuTensor {
+        let c = *normed.shape.last().unwrap();
+        let rows = normed.len() / c;
+        let hidden_dim = self.fc1_w.shape[0];
+        let chunk = ctx.max_rows(hidden_dim, normed.dtype);
+        if rows <= chunk {
+            let hidden = ctx.linear(normed, &self.fc1_w, Some(&self.fc1_b));
+            let act = ctx.gelu(&hidden);
+            return ctx.linear(&act, &self.fc2_w, Some(&self.fc2_b));
+        }
+        let mlp = ctx.empty_typed(&[rows, c], normed.dtype);
+        let mut r0 = 0;
+        while r0 < rows {
+            let n = chunk.min(rows - r0);
+            let normed_chunk = ctx.empty_typed(&[n, c], normed.dtype);
+            ctx.copy_rows(normed, r0, &normed_chunk, 0, n);
+            let hidden = ctx.linear(&normed_chunk, &self.fc1_w, Some(&self.fc1_b));
+            let act = ctx.gelu(&hidden);
+            let mlp_chunk = ctx.linear(&act, &self.fc2_w, Some(&self.fc2_b));
+            ctx.copy_rows(&mlp_chunk, 0, &mlp, r0, n);
+            // Bound peak memory to one chunk's transients (with the default
+            // serialized backpressure this frees them before the next chunk).
+            ctx.flush();
+            r0 += n;
+        }
+        mlp
     }
 }

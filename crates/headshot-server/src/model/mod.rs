@@ -5,6 +5,7 @@
 //! (f16 storage / f32 math, WMMA GEMMs) validated against the bf16 dumps.
 
 pub mod block;
+pub mod cache;
 pub mod camera_head;
 pub mod dense_head;
 pub mod dino;

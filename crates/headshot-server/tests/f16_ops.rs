@@ -80,11 +80,11 @@ fn every_op_f16_matches_f32() {
     ));
     close(&f16_out, &f32_out, 2e-3, "residual_ls");
 
-    // qkv_split + attn_merge
-    let qkv = rvec(6, rows * 3 * c);
-    let [q32, _, _] = ctx.qkv_split(&up(&qkv, &[rows, 3 * c], Dtype::F32), s, t, h, d);
-    let [q16, _, _] = ctx.qkv_split(&up(&qkv, &[rows, 3 * c], Dtype::F16), s, t, h, d);
-    close(&ctx.download(&q16), &ctx.download(&q32), 1e-6, "qkv_split");
+    // split_heads + attn_merge
+    let qkv = rvec(6, rows * c);
+    let q32 = ctx.split_heads(&up(&qkv, &[rows, c], Dtype::F32), s, t, h, d);
+    let q16 = ctx.split_heads(&up(&qkv, &[rows, c], Dtype::F16), s, t, h, d);
+    close(&ctx.download(&q16), &ctx.download(&q32), 1e-6, "split_heads");
     close(
         &ctx.download(&ctx.attn_merge(&q16)),
         &ctx.download(&ctx.attn_merge(&q32)),

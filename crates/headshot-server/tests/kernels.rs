@@ -239,39 +239,38 @@ fn attention_case(ctx: &GpuContext, t: usize) {
 }
 
 #[test]
-fn qkv_split_merge_roundtrip() {
+fn split_heads_merge_roundtrip() {
     let Some(ctx) = ctx() else { return };
     let mut rng = Rng(6);
     let (s, t, h, d) = (2, 5, 4, 8);
-    let qkv = rng.vec(s * t * 3 * h * d);
-    let g = ctx.tensor_from_slice(&[s * t, 3 * h * d], &qkv);
-    let [q, k, v] = ctx.qkv_split(&g, s, t, h, d);
+    let x = rng.vec(s * t * h * d);
+    let g = ctx.tensor_from_slice(&[s * t, h * d], &x);
+    let q = ctx.split_heads(&g, s, t, h, d);
 
-    // CPU check of q layout + merge(q) recovers the q columns
+    // CPU check of head-major layout
     let gq = ctx.download(&q);
     for si in 0..s {
         for hi in 0..h {
             for ti in 0..t {
                 for di in 0..d {
                     let got = gq[(((si * h) + hi) * t + ti) * d + di];
-                    let want = qkv[(si * t + ti) * 3 * h * d + hi * d + di];
+                    let want = x[(si * t + ti) * h * d + hi * d + di];
                     assert_eq!(got, want, "q[{si},{hi},{ti},{di}]");
                 }
             }
         }
     }
-    let _ = ctx.download(&k);
+    // merge is the inverse: it recovers the token-major projection
     let merged = ctx.download(&ctx.attn_merge(&q));
     for si in 0..s {
         for ti in 0..t {
             for ci in 0..h * d {
                 let got = merged[(si * t + ti) * h * d + ci];
-                let want = qkv[(si * t + ti) * 3 * h * d + ci];
+                let want = x[(si * t + ti) * h * d + ci];
                 assert_eq!(got, want, "merge[{si},{ti},{ci}]");
             }
         }
     }
-    let _ = ctx.download(&v);
 }
 
 #[test]

@@ -5,6 +5,7 @@
 use anyhow::Result;
 
 use super::block::{Block, Rope};
+use super::cache::Cache;
 use super::dino::Tap;
 use super::{read_f32, upload_at};
 use crate::engine::tensor::{Dtype, GpuTensor};
@@ -44,8 +45,8 @@ impl Trunk {
         })
     }
 
-    /// dino_tokens (N·P, 1024) → the four cached tensors (N·T, 2048),
-    /// T = P + 17 (doc/01 §3.3).
+    /// dino_tokens (N·P, 1024) → the four head-input [`Cache`]s (N·T, 2048
+    /// f32), T = P + 17 (doc/01 §3.3).
     ///
     /// `tap` observes "trunk.frame.NN" (N·T, 1024), "trunk.inter.NN"
     /// (N·T or N·17 rows — register layers carry only the gathered prefix
@@ -59,7 +60,7 @@ impl Trunk {
         h_p: usize,
         w_p: usize,
         mut tap: Option<Tap<'_>>,
-    ) -> Result<Vec<GpuTensor>> {
+    ) -> Result<Vec<Cache>> {
         let p = h_p * w_p;
         assert_eq!(dino_tokens.len(), n * p * DIM);
         // DINO always emits f32 (massive activations; see Dino::load) —
@@ -127,15 +128,13 @@ impl Trunk {
                 }
                 if headshot_shared::model::CACHED_LAYERS.contains(&k) {
                     // cached head inputs are f32 (doc/01 §3.3) — the heads'
-                    // autocast boundary
-                    let cache = ctx.concat_channels(&frame_out, &inter_out);
-                    let cache = if cache.dtype == Dtype::F16 {
-                        ctx.cast_to_f32(&cache)
-                    } else {
-                        cache
-                    };
-                    if let Some(tap) = tap.as_deref_mut() {
-                        tap(&format!("cache.{k:02}"), &cache);
+                    // autocast boundary. Streamed in frame groups so the
+                    // (N·T, 2048) cache never lands in a single > 2 GiB buffer.
+                    let cache = Cache::build(ctx, &frame_out, &inter_out, n, t);
+                    if let Some(tap) = tap.as_deref_mut()
+                        && let Some(full) = cache.as_full()
+                    {
+                        tap(&format!("cache.{k:02}"), full);
                     }
                     caches.push(cache);
                 }

@@ -4,8 +4,9 @@
 use anyhow::Result;
 
 use super::block::Block;
+use super::cache::Cache;
 use super::dino::Tap;
-use super::{upload_f32};
+use super::upload_f32;
 use crate::engine::GpuContext;
 use crate::engine::tensor::{Dtype, GpuTensor};
 use crate::weights::Weights;
@@ -46,8 +47,7 @@ impl CameraHead {
         })
     }
 
-    /// `cache23` is the layer-23 cached tensor (N·T, 2048) at any engine
-    /// precision (cast to f32 here — the head's autocast boundary).
+    /// `cache23` is the layer-23 head-input [`Cache`] (f32, N·T×2048).
     /// Returns `pose_enc` (N, 9): t(3), quat xyzw(4), fov_h, fov_w —
     /// with the `relu(x)+0.01` FoV activation already applied.
     ///
@@ -55,17 +55,14 @@ impl CameraHead {
     pub fn forward(
         &self,
         ctx: &GpuContext,
-        cache23: &GpuTensor,
+        cache23: &Cache,
         n: usize,
         mut tap: Option<Tap<'_>>,
     ) -> Vec<f32> {
-        let t_full = cache23.len() / DIM / n;
-
         // gather the 17 prefix tokens of every frame, as f32
         let gathered = ctx.empty(&[n * PREFIX, DIM]);
-        assert_eq!(cache23.dtype, Dtype::F32, "cached head inputs are f32 (doc/01 §3.3)");
         for i in 0..n {
-            ctx.copy_rows(cache23, i * t_full, &gathered, i * PREFIX, PREFIX);
+            cache23.copy_frame(ctx, i, 0, PREFIX, &gathered, i * PREFIX);
         }
 
         // one sequence over all frames' prefix tokens, no RoPE, no QK-norm

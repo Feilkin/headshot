@@ -1,5 +1,7 @@
-// Split a fused qkv projection (S·T, 3·H·D) into head-major q, k, v
-// tensors (S, H, T, D) ready for QK-norm / RoPE / attention.
+// Reshape a per-token projection (S·T, H·D) into a head-major tensor
+// (S, H, T, D) ready for QK-norm / RoPE / attention. Runs once per q, k, v
+// (each projected by its own GEMM, so no fused 3·H·D activation is ever
+// materialized — that buffer overflows wgpu's 2 GiB cap at high frame counts).
 
 @if(f16) enable f16;
 
@@ -14,10 +16,8 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read> qkv: array<Elem>;
-@group(0) @binding(2) var<storage, read_write> q: array<Elem>;
-@group(0) @binding(3) var<storage, read_write> k: array<Elem>;
-@group(0) @binding(4) var<storage, read_write> v: array<Elem>;
+@group(0) @binding(1) var<storage, read> x: array<Elem>;
+@group(0) @binding(2) var<storage, read_write> out: array<Elem>;
 
 @compute @workgroup_size(256)
 fn main(
@@ -37,8 +37,6 @@ fn main(
     let s = i / (p.d * p.t * p.h);
 
     let hd = p.h * p.d;
-    let row = (s * p.t + t) * 3u * hd + h * p.d + d;
-    q[i] = qkv[row];
-    k[i] = qkv[row + hd];
-    v[i] = qkv[row + 2u * hd];
+    let row = (s * p.t + t) * hd + h * p.d + d;
+    out[i] = x[row];
 }

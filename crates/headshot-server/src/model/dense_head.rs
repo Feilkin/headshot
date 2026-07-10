@@ -9,11 +9,12 @@
 
 use anyhow::Result;
 
+use super::cache::Cache;
 use super::dino::Tap;
 use super::upload_f32;
 use crate::engine::GpuContext;
 use crate::engine::ops::UnaryOp;
-use crate::engine::tensor::{Dtype, GpuTensor};
+use crate::engine::tensor::GpuTensor;
 use crate::weights::Weights;
 
 const PREFIX: usize = 17;
@@ -174,7 +175,7 @@ impl DenseHead {
     pub fn forward(
         &self,
         ctx: &GpuContext,
-        caches: &[GpuTensor],
+        caches: &[Cache],
         n: usize,
         h_p: usize,
         w_p: usize,
@@ -183,7 +184,6 @@ impl DenseHead {
     ) -> Result<DenseOutput> {
         assert_eq!(caches.len(), 4);
         let p = h_p * w_p;
-        let t = p + PREFIX;
         let (height, width) = (16 * h_p, 16 * w_p);
         let aspect = width as f32 / height as f32;
 
@@ -207,10 +207,9 @@ impl DenseHead {
             // per level: patch tokens → LN → 1×1 conv → +UV → resize
             let mut levels: Vec<GpuTensor> = Vec::with_capacity(4);
             for (j, cache) in caches.iter().enumerate() {
-                assert_eq!(cache.dtype, Dtype::F32, "cached head inputs are f32");
                 let tokens = ctx.empty(&[nc * p, DIM]);
                 for i in 0..nc {
-                    ctx.copy_rows(cache, (chunk0 + i) * t + PREFIX, &tokens, i * p, p);
+                    cache.copy_frame(ctx, chunk0 + i, PREFIX, p, &tokens, i * p);
                 }
                 let normed = ctx.layernorm(&tokens, &self.norm_w, &self.norm_b);
                 let projected = ctx.linear(&normed, &self.projects[j].0, Some(&self.projects[j].1));

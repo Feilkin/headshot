@@ -111,6 +111,23 @@ impl GpuContext {
         GpuTensor { buffer, shape: shape.to_vec(), dtype: Dtype::F16 }
     }
 
+    /// Largest row count whose `(rows, width)` tensor of `dtype` still fits
+    /// under the device's `max_buffer_size` (accounting for the 16-row
+    /// allocation slack every tensor carries). Row-independent ops stream
+    /// their tokens in chunks of this size when the full activation would
+    /// exceed the limit (wgpu caps a single buffer at 2 GiB on many drivers).
+    pub fn max_rows(&self, width: usize, dtype: Dtype) -> usize {
+        // Test/experiment override: force a small chunk to exercise the
+        // streaming path without a multi-GB allocation.
+        if let Some(n) = std::env::var("HEADSHOT_MAX_ROWS").ok().and_then(|v| v.parse().ok()) {
+            return n;
+        }
+        let cap = self.device.limits().max_buffer_size;
+        let elem = (width * dtype.size()) as u64;
+        // total = (rows + 16) * elem (before the ≤3-byte round-up to 4)
+        (cap / elem).saturating_sub(16) as usize
+    }
+
     /// Zero-initialized tensor (kernel output).
     pub fn empty_typed(&self, shape: &[usize], dtype: Dtype) -> GpuTensor {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {

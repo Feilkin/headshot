@@ -182,27 +182,18 @@ impl GpuContext {
         out
     }
 
-    /// (S·T, 3·H·D) → q, k, v each (S, H, T, D).
-    pub fn qkv_split(
-        &self,
-        qkv: &GpuTensor,
-        s: usize,
-        t: usize,
-        h: usize,
-        d: usize,
-    ) -> [GpuTensor; 3] {
-        assert_eq!(qkv.len(), s * t * 3 * h * d);
-        let shape = [s, h, t, d];
-        let out = [
-            self.empty_typed(&shape, qkv.dtype),
-            self.empty_typed(&shape, qkv.dtype),
-            self.empty_typed(&shape, qkv.dtype),
-        ];
+    /// Per-token projection (S·T, H·D) → head-major (S, H, T, D). Called
+    /// once per q/k/v: each is projected by its own GEMM (see [`Block`]), so
+    /// the fused (S·T, 3·H·D) activation — which overflows wgpu's 2 GiB buffer
+    /// cap at high frame counts — is never materialized.
+    pub fn split_heads(&self, x: &GpuTensor, s: usize, t: usize, h: usize, d: usize) -> GpuTensor {
+        assert_eq!(x.len(), s * t * h * d);
+        let out = self.empty_typed(&[s, h, t, d], x.dtype);
         let params = FourU32 { a: s as u32, b: t as u32, c: h as u32, d: d as u32 };
         self.dispatch(
-            variant("qkv_split", "qkv_split_f16", qkv.dtype),
+            variant("split_heads", "split_heads_f16", x.dtype),
             bytemuck::bytes_of(&params),
-            &[qkv, &out[0], &out[1], &out[2]],
+            &[x, &out],
             grid_2d((s * h * t * d) as u64, 256),
         );
         out

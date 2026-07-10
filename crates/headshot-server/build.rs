@@ -12,7 +12,7 @@ const DUAL_KERNELS: &[&str] = &[
     "layernorm",
     "gelu",
     "residual_ls",
-    "qkv_split",
+    "split_heads",
     "attn_merge",
     "rope_apply",
     "attention",
