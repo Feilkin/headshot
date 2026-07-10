@@ -71,6 +71,9 @@ fusion, which suppresses movers and noise simultaneously.
 
 1. **PLY (binary)** — points: position f32×3 (metric if aligned), color u8×3,
    confidence f32, source frame id u16. Plus cameras as a sidecar JSON.
+   *Implemented* (`headshot_shared::ply`; client Export button /
+   `--export-ply`, server `reconstruct` bin) — currently frame-0
+   coordinates at arbitrary scale, unfiltered with confidence per vertex.
 2. **LAS/LAZ** (only when geo-aligned) — with WGS84/UTM georeference from the
    ENU origin.
 3. **Session bundle** (directory or zip): keyframe manifest (source file,

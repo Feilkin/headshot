@@ -13,16 +13,27 @@ pub struct PlyPoint {
 }
 
 pub fn write_ply(path: &Path, points: &[PlyPoint]) -> io::Result<()> {
-    let mut out = BufWriter::new(std::fs::File::create(path)?);
+    write_ply_iter(path, points.len(), points.iter().copied())
+}
+
+/// Streaming variant for callers whose points aren't materialized as one
+/// slice (the client keeps chunked column arrays). `count` must match the
+/// iterator length — PLY headers state the vertex count up front.
+pub fn write_ply_iter(
+    path: &Path,
+    count: usize,
+    points: impl Iterator<Item = PlyPoint>,
+) -> io::Result<()> {
+    let mut out = BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
     write!(
         out,
         "ply\nformat binary_little_endian 1.0\ncomment headshot reconstruction\n\
-         element vertex {}\n\
+         element vertex {count}\n\
          property float x\nproperty float y\nproperty float z\n\
          property uchar red\nproperty uchar green\nproperty uchar blue\n\
          property float confidence\nproperty ushort frame\nend_header\n",
-        points.len()
     )?;
+    let mut written = 0usize;
     for p in points {
         for v in p.pos {
             out.write_all(&v.to_le_bytes())?;
@@ -30,7 +41,9 @@ pub fn write_ply(path: &Path, points: &[PlyPoint]) -> io::Result<()> {
         out.write_all(&p.color)?;
         out.write_all(&p.conf.to_le_bytes())?;
         out.write_all(&p.frame.to_le_bytes())?;
+        written += 1;
     }
+    debug_assert_eq!(written, count, "PLY header count must match the points written");
     out.flush()
 }
 

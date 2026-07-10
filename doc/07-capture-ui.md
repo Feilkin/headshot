@@ -38,7 +38,11 @@ crates/headshot-client/src/
   ui/reconstruct.rs floating panels over the 3D view: Filters (confidence
                     slider, frame-group radios, frusta toggle — two-way
                     sync with Scene + keyboard), server log, point-count
-                    stats, help bar
+                    stats with Export PLY button (doc/06 §4; writes
+                    headshot-cloud-NNN.ply + cameras sidecar to the cwd
+                    on a background thread), help bar
+  export.rs         binary PLY via headshot_shared::ply + cameras JSON;
+                    also behind --export-ply (headless + auto flows)
 ```
 
 - All heavy work (decode, scoring, extraction, protocol) runs in

@@ -33,6 +33,11 @@ pub struct WorkerTx(pub Sender<Command>);
 #[derive(Resource)]
 pub struct WorkerRx(pub Receiver<Event>);
 
+/// Sender side of the same event stream, for UI-spawned background work
+/// (exports) to report progress through the normal pump.
+#[derive(Resource)]
+pub struct EventTx(pub Sender<Event>);
+
 /// The editable plan between scan and realize.
 #[derive(Resource, Default)]
 pub struct PlanRes(pub Option<Box<SessionPlan>>);
@@ -43,6 +48,32 @@ pub struct SessionSettings {
     pub server: String,
     pub edge_threshold: f32,
     pub dump_keyframes: Option<PathBuf>,
+    /// Auto-export the cloud here when a session finishes.
+    pub export_ply: Option<PathBuf>,
+}
+
+/// Export on a background thread (clouds run to hundreds of MB); progress
+/// and the result land in the status log via the event pump.
+pub fn spawn_export(
+    chunks: Vec<std::sync::Arc<crate::session::ChunkPoints>>,
+    cameras: Vec<headshot_shared::pose::Camera>,
+    path: PathBuf,
+    tx: Sender<Event>,
+) {
+    std::thread::spawn(move || {
+        let n: usize = chunks.iter().map(|c| c.positions.len()).sum();
+        let _ = tx.send(Event::Progress(format!("exporting {n} points…")));
+        let msg = match crate::export::export_ply(&chunks, &cameras, &path) {
+            Ok(stats) => format!(
+                "exported {} points → {} (+ {})",
+                stats.points,
+                stats.ply.display(),
+                stats.cameras.display(),
+            ),
+            Err(e) => format!("export failed: {e:#}"),
+        };
+        let _ = tx.send(Event::Progress(msg));
+    });
 }
 
 pub struct CaptureUiPlugin;
@@ -65,8 +96,11 @@ impl Plugin for CaptureUiPlugin {
 
 /// Drain worker events every frame: progress → status line, scan results
 /// → plan + screen change, session traffic → the point-cloud scene.
+#[allow(clippy::too_many_arguments)]
 fn pump_worker_events(
     rx: Option<Res<WorkerRx>>,
+    tx: Res<EventTx>,
+    settings: Res<SessionSettings>,
     mut scene: ResMut<CloudScene>,
     mut plan: ResMut<PlanRes>,
     mut setup_state: ResMut<setup::SetupState>,
@@ -80,6 +114,16 @@ fn pump_worker_events(
         }
         if let Event::Viewer(ViewerEvent::Status(m)) = &event {
             status_log.push(m.clone());
+        }
+        if let Event::Viewer(ViewerEvent::Done) = &event
+            && let Some(path) = &settings.export_ply
+        {
+            spawn_export(
+                scene.chunks.clone(),
+                scene.cameras.clone(),
+                path.clone(),
+                tx.0.clone(),
+            );
         }
         match event {
             Event::Progress(m) => scene.status = m,

@@ -3,22 +3,32 @@
 //! the command line it runs the automatic CLI flow (M3-compatible);
 //! without one it opens the Setup screen.
 //!
-//! Viewer controls: drag = orbit, wheel = zoom, `[`/`]` = confidence
-//! percentile, `G` = cycle frame groups (all / even / odd), `F` = frusta.
+//! Viewer controls: drag = orbit, right-drag = pan, wheel = zoom,
+//! `[`/`]` = confidence percentile, `G` = cycle frame groups
+//! (all / even / odd), `F` = frusta.
 
+mod export;
 mod session;
 mod ui;
+
+use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::feathers::FeathersPlugins;
 use bevy::feathers::dark_theme::create_dark_theme;
 use bevy::feathers::theme::UiTheme;
-use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::mesh::PrimitiveTopology;
+use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use clap::Parser;
 use headshot_shared::pose::Camera as PoseCamera;
 use session::{ChunkPoints, SessionConfig, ViewerEvent};
+
+/// The reconstruction lives in frame-0 OpenCV camera coordinates (+y
+/// down, +z forward). Chunk meshes are parented under a root with this
+/// rotation (π about X → y up, scene toward −Z), so the stock Y-up
+/// pan-orbit camera works; frusta gizmos apply it per point.
+const WORLD_FLIP: Quat = Quat::from_xyzw(1.0, 0.0, 0.0, 0.0);
 
 /// Capture GUI + progressive point-cloud viewer for reconstruction
 /// sessions.
@@ -52,6 +62,12 @@ struct Args {
     #[arg(long)]
     dump_keyframes: Option<std::path::PathBuf>,
 
+    /// Write the finished point cloud here as binary PLY (doc/06 §4; a
+    /// `.cameras.json` sidecar lands next to it). Applies to `--headless`
+    /// and the automatic flow; the GUI also has an Export button.
+    #[arg(long)]
+    export_ply: Option<std::path::PathBuf>,
+
     /// 3×3 relative depth-jump threshold (doc/01 §5.3).
     #[arg(long, default_value_t = 0.03)]
     edge_threshold: f32,
@@ -70,7 +86,8 @@ struct Args {
 
 #[derive(Resource)]
 pub struct Scene {
-    pub chunks: Vec<ChunkPoints>,
+    /// `Arc` so the export thread can hold the data without copying it.
+    pub chunks: Vec<Arc<ChunkPoints>>,
     pub chunk_entities: Vec<Entity>,
     pub cameras: Vec<PoseCamera>,
     /// Confidence quantile dropped (0.3 keeps the top 70 %).
@@ -123,7 +140,7 @@ pub fn apply_viewer_event(scene: &mut Scene, event: ViewerEvent) {
         ViewerEvent::Status(s) => scene.status = s,
         ViewerEvent::Cameras(cams) => scene.cameras = cams,
         ViewerEvent::Chunk(chunk) => {
-            scene.chunks.push(chunk);
+            scene.chunks.push(Arc::new(chunk));
             scene.dirty = true;
         }
         ViewerEvent::Done => {}
@@ -134,13 +151,9 @@ pub fn apply_viewer_event(scene: &mut Scene, event: ViewerEvent) {
 #[derive(Component)]
 struct ChunkMesh;
 
+/// Parent of all chunk meshes; carries [`WORLD_FLIP`].
 #[derive(Component)]
-struct Orbit {
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
-    target: Vec3,
-}
+struct CloudRoot;
 
 fn main() {
     let args = Args::parse();
@@ -148,6 +161,7 @@ fn main() {
         server: args.server.clone(),
         edge_threshold: args.edge_threshold,
         dump_keyframes: args.dump_keyframes.clone(),
+        export_ply: args.export_ply.clone(),
     };
 
     // one unified event stream feeds the app in both modes
@@ -177,12 +191,34 @@ fn main() {
         std::thread::spawn(move || session::run(config, vtx));
 
         if args.headless {
+            let mut chunks: Vec<Arc<ChunkPoints>> = Vec::new();
+            let mut cameras: Vec<PoseCamera> = Vec::new();
             for event in vrx.iter() {
                 match event {
                     ViewerEvent::Status(s) => println!("status: {s}"),
-                    ViewerEvent::Cameras(cams) => println!("cameras: {}", cams.len()),
-                    ViewerEvent::Chunk(c) => println!("chunk: {} points", c.positions.len()),
+                    ViewerEvent::Cameras(cams) => {
+                        println!("cameras: {}", cams.len());
+                        cameras = cams;
+                    }
+                    ViewerEvent::Chunk(c) => {
+                        println!("chunk: {} points", c.positions.len());
+                        chunks.push(Arc::new(c));
+                    }
                     ViewerEvent::Done => {
+                        if let Some(path) = &args.export_ply {
+                            match export::export_ply(&chunks, &cameras, path) {
+                                Ok(stats) => println!(
+                                    "exported {} points → {} (+ {})",
+                                    stats.points,
+                                    stats.ply.display(),
+                                    stats.cameras.display(),
+                                ),
+                                Err(e) => {
+                                    eprintln!("export failed: {e:#}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
                         println!("done");
                         return;
                     }
@@ -213,7 +249,8 @@ fn main() {
     };
 
     // GUI worker (drives scans + reconstructions; idle in automatic mode)
-    std::thread::spawn(move || ui::worker::run(cmd_rx, evt_tx));
+    let worker_tx = evt_tx.clone();
+    std::thread::spawn(move || ui::worker::run(cmd_rx, worker_tx));
 
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -221,25 +258,31 @@ fn main() {
             ..default()
         }))
         .add_plugins(FeathersPlugins)
+        .add_plugins(PanOrbitCameraPlugin)
         .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ui::WorkerTx(cmd_tx))
         .insert_resource(ui::WorkerRx(evt_rx))
+        .insert_resource(ui::EventTx(evt_tx))
         .insert_resource(settings)
         .insert_resource(preset)
         .insert_resource(Scene::default())
         .insert_state(initial)
         .add_plugins(ui::CaptureUiPlugin)
         .add_systems(Startup, setup)
-        .add_systems(Update, (keyboard, rebuild_meshes, orbit_camera, draw_frusta))
+        .add_systems(Update, (keyboard, rebuild_meshes, draw_frusta))
         .run();
 }
 
 fn setup(mut commands: Commands) {
+    // scene center sits ~1 unit in front of the reference camera, which
+    // WORLD_FLIP maps to (0, 0, -1)
+    let focus = Vec3::new(0.0, 0.0, -1.0);
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 0.0, -2.0).looking_at(Vec3::new(0.0, 0.0, 1.0), -Vec3::Y),
-        Orbit { yaw: 0.0, pitch: 0.0, distance: 2.0, target: Vec3::new(0.0, 0.0, 1.0) },
+        Transform::from_xyz(0.0, 0.0, 1.0).looking_at(focus, Vec3::Y),
+        PanOrbitCamera { focus, ..default() },
     ));
+    commands.spawn((CloudRoot, Transform::from_rotation(WORLD_FLIP), Visibility::default()));
 }
 
 fn keyboard(mut scene: ResMut<Scene>, keys: Res<ButtonInput<KeyCode>>) {
@@ -271,10 +314,12 @@ fn rebuild_meshes(
     mut scene: ResMut<Scene>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    root: Query<Entity, With<CloudRoot>>,
 ) {
     if !scene.dirty {
         return;
     }
+    let Ok(root) = root.single() else { return };
     scene.dirty = false;
 
     // percentile over the global confidence distribution (doc/04 §4)
@@ -312,36 +357,16 @@ fn rebuild_meshes(
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
         entities.push(
             commands
-                .spawn((ChunkMesh, Mesh3d(meshes.add(mesh)), MeshMaterial3d(material.clone())))
+                .spawn((
+                    ChunkMesh,
+                    Mesh3d(meshes.add(mesh)),
+                    MeshMaterial3d(material.clone()),
+                    ChildOf(root),
+                ))
                 .id(),
         );
     }
     scene.chunk_entities = entities;
-}
-
-fn orbit_camera(
-    mut query: Query<(&mut Orbit, &mut Transform)>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    mut motion: MessageReader<MouseMotion>,
-    mut wheel: MessageReader<MouseWheel>,
-) {
-    let Ok((mut orbit, mut transform)) = query.single_mut() else { return };
-    if buttons.pressed(MouseButton::Left) {
-        for ev in motion.read() {
-            orbit.yaw -= ev.delta.x * 0.005;
-            orbit.pitch = (orbit.pitch - ev.delta.y * 0.005).clamp(-1.5, 1.5);
-        }
-    } else {
-        motion.clear();
-    }
-    for ev in wheel.read() {
-        orbit.distance = (orbit.distance * (1.0 - ev.y * 0.1)).clamp(0.05, 100.0);
-    }
-    // OpenCV convention: +y down, +z forward — orbit in that frame
-    let rot = Quat::from_euler(EulerRot::YXZ, orbit.yaw, orbit.pitch, 0.0);
-    let offset = rot * Vec3::new(0.0, 0.0, -orbit.distance);
-    transform.translation = orbit.target + offset;
-    transform.look_at(orbit.target, -Vec3::Y);
 }
 
 fn draw_frusta(scene: Res<Scene>, mut gizmos: Gizmos) {
@@ -352,7 +377,7 @@ fn draw_frusta(scene: Res<Scene>, mut gizmos: Gizmos) {
         if !scene.frame_group.keeps(i as u16) {
             continue;
         }
-        let center = Vec3::from_array(cam.center());
+        let center = WORLD_FLIP * Vec3::from_array(cam.center());
         let depth = 0.15;
         let corners = [
             (0.0, 0.0),
@@ -360,7 +385,7 @@ fn draw_frusta(scene: Res<Scene>, mut gizmos: Gizmos) {
             (2.0 * cam.cx, 2.0 * cam.cy),
             (0.0, 2.0 * cam.cy),
         ]
-        .map(|(x, y)| Vec3::from_array(cam.unproject(x as u32, y as u32, depth)));
+        .map(|(x, y)| WORLD_FLIP * Vec3::from_array(cam.unproject(x as u32, y as u32, depth)));
         let color = if i == 0 {
             Color::srgb(1.0, 0.3, 0.2) // reference frame stands out
         } else if i % 2 == 0 {

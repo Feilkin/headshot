@@ -318,6 +318,19 @@ fn stats_panel() -> impl SceneList {
                 InheritableFont { font: fonts::MONO, font_size: FontSize::Px(10.0) }
                 Children [ (Text("") ThemedText TextColor(palette::LIGHT_GRAY_2) ChunksText) ]
             ),
+            (
+                Node {
+                    align_self: AlignSelf::Stretch,
+                    justify_content: JustifyContent::Center,
+                    padding: px(8),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(4)),
+                }
+                BorderColor::all(palette::ACCENT)
+                on(export_clicked)
+                InheritableFont { font: fonts::BOLD, font_size: FontSize::Px(12.0) }
+                Children [ (Text("Export PLY") ThemedText TextColor(palette::ACCENT)) ]
+            ),
         ]
     )}
 }
@@ -347,7 +360,7 @@ fn help_bar() -> impl SceneList {
         BorderColor::all(theme::BORDER_SUBTLE)
         Children [
             {theme::t_mono(11.0, palette::LIGHT_GRAY_2,
-                "drag to orbit · scroll to zoom · [ ] confidence · G group · F frusta")},
+                "drag orbit · right-drag pan · scroll zoom · [ ] confidence · G group · F frusta")},
             (
                 Node { width: px(1), height: px(14) }
                 BackgroundColor(theme::BORDER_SUBTLE)
@@ -379,6 +392,24 @@ fn group_clicked(
         scene.frame_group = row.0;
         scene.dirty = true;
     }
+}
+
+/// Export everything received so far (a partial cloud mid-session is
+/// fine — confidence and frame ids ride along) to the first free
+/// `headshot-cloud-NNN.ply` in the working directory.
+fn export_clicked(
+    _: On<Pointer<Click>>,
+    scene: Res<CloudScene>,
+    tx: Res<super::EventTx>,
+    mut log: ResMut<StatusLog>,
+) {
+    if scene.chunks.is_empty() {
+        log.push("nothing to export yet".into());
+        return;
+    }
+    let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let path = crate::export::next_free_path(&dir);
+    super::spawn_export(scene.chunks.clone(), scene.cameras.clone(), path, tx.0.clone());
 }
 
 // ---- systems --------------------------------------------------------------

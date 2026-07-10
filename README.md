@@ -64,9 +64,13 @@ LUT with `--dlog-lut <file.cube>`, or `--dlog` for the parametric
 approximation. `--dump-keyframes <dir>` writes the preprocessed frames +
 manifest for inspection.
 
-Viewer controls: drag = orbit, wheel = zoom, `[`/`]` = confidence
-percentile, `G` = frame groups, `F` = frusta. `--headless` runs the session
-without a window. Manual viewer checklist: doc/m3-viewer-checklist.md.
+Viewer controls: drag = orbit, right-drag = pan, wheel = zoom, `[`/`]` =
+confidence percentile, `G` = frame groups, `F` = frusta. `--headless` runs
+the session without a window. Export: the Export PLY button (or
+`--export-ply <path>`, which also works headless) writes the doc/06 §4
+binary PLY plus a `.cameras.json` sidecar — all points unfiltered, with
+confidence and source-frame id per vertex. Manual viewer checklist:
+doc/m3-viewer-checklist.md.
 Capture-sample suite: `HEADSHOT_SAMPLES_DIR=<dir> just samples` (local DJI
 clips + RAW; never committed).
 

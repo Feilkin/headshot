@@ -18,9 +18,11 @@ bevy = { version = "0.19", default-features = false, features = [
     "bevy_feathers",
     "bevy_state",
 ] }
+bevy_panorbit_camera = "0.35"
 bytemuck.workspace = true
 clap.workspace = true
 crossbeam-channel = "0.5.16"
 half.workspace = true
 headshot-capture.workspace = true
 headshot-shared.workspace = true
+serde_json.workspace = true
