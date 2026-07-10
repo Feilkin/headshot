@@ -4,6 +4,7 @@ members = [
     "crates/headshot-shared",
     "crates/headshot-server",
     "crates/headshot-client",
+    "crates/headshot-capture",
 ]
 
 [workspace.package]
@@ -15,6 +16,7 @@ repository = "https://github.com/bilberry-games/headshot"
 
 [workspace.dependencies]
 headshot-shared = { path = "crates/headshot-shared" }
+headshot-capture = { path = "crates/headshot-capture" }
 
 # Keep wgpu on the same major as bevy 0.19 (which pins wgpu 29.0.x) so the
 # workspace resolves to a single wgpu.
@@ -29,6 +31,7 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
+image = "0.25.10"
 
 # Fast/faster in dev: the model math is unusable unoptimized, and bevy
 # recommends optimized deps even in debug builds.

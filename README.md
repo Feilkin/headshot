@@ -42,13 +42,31 @@ cargo run --release -p headshot-server --bin reconstruct -- <frames-dir> -o scen
 # server (Strix Halo box); 0.0.0.0 to accept LAN clients
 cargo run --release -p headshot-server -- --listen 0.0.0.0:9276
 
-# viewer (any machine; needs a display)
-cargo run --release -p headshot-client -- <frames-dir> --server <box-ip>:9276
+# capture GUI (any machine; needs a display + ffmpeg on PATH)
+cargo run --release -p headshot-client -- --server <box-ip>:9276
+
+# CLI flow: reconstruct <media-dir> immediately, no interaction
+cargo run --release -p headshot-client -- <media-dir> --server <box-ip>:9276
 ```
+
+The GUI starts on a Setup screen: add media (type a path, drag & drop on
+X11, or launch with `<media-dir> --review` to pre-fill), prune the
+discovered file tree, scan, then edit keyframes in the Review screen —
+scrub candidates, toggle inclusion, zoom the centered crop per frame, pick
+the session aspect — before reconstructing with a live log pane.
+
+`<media-dir>` may mix DJI video (H.264/H.265 + sidecar or embedded `.srt`
+telemetry), RAW/JPEG/HEIC photos — keyframes are selected under `--budget`
+(default 200; server cost is quadratic). D-Log footage: pass the official
+LUT with `--dlog-lut <file.cube>`, or `--dlog` for the parametric
+approximation. `--dump-keyframes <dir>` writes the preprocessed frames +
+manifest for inspection.
 
 Viewer controls: drag = orbit, wheel = zoom, `[`/`]` = confidence
 percentile, `G` = frame groups, `F` = frusta. `--headless` runs the session
 without a window. Manual viewer checklist: doc/m3-viewer-checklist.md.
+Capture-sample suite: `HEADSHOT_SAMPLES_DIR=<dir> just samples` (local DJI
+clips + RAW; never committed).
 
 ## Building & testing
 

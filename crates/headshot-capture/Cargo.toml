@@ -1,0 +1,21 @@
+[package]
+name = "headshot-capture"
+description = "capture preprocessing: media decode, tonemapping, keyframe selection, SRT telemetry, session assembly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+headshot-shared.workspace = true
+image.workspace = true
+# RAW decode + neutral develop (LGPL-2.1: fine as a dependency of this
+# MIT/Apache source tree; binary distribution carries LGPL obligations)
+rawler = "0.7"
+kamadak-exif = "0.6"
+serde.workspace = true
+serde_json.workspace = true
+# manifest records the .cube LUT hash for reproducibility (doc/06 §4)
+sha2 = "0.10"
+thiserror.workspace = true

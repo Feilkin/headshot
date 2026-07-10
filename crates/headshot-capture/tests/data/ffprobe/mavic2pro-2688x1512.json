@@ -1,0 +1,39 @@
+{
+    "streams": [
+        {
+            "index": 0,
+            "codec_name": "hevc",
+            "codec_type": "video",
+            "width": 2688,
+            "height": 1512,
+            "pix_fmt": "yuv420p10le",
+            "color_range": "tv",
+            "color_transfer": "bt709",
+            "color_primaries": "bt709",
+            "r_frame_rate": "30000/1001",
+            "avg_frame_rate": "30000/1001",
+            "time_base": "1/30000",
+            "nb_frames": "8991",
+            "bit_rate": "99873441"
+        },
+        {
+            "index": 1,
+            "codec_name": "aac",
+            "codec_type": "audio",
+            "sample_rate": "48000",
+            "channels": 2
+        },
+        {
+            "index": 2,
+            "codec_name": "mov_text",
+            "codec_type": "subtitle",
+            "nb_frames": "8991"
+        }
+    ],
+    "format": {
+        "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+        "duration": "299.966333",
+        "size": "3745234121",
+        "bit_rate": "99887123"
+    }
+}

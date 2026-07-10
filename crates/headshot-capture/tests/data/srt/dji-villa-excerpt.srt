@@ -1,0 +1,47 @@
+1
+00:00:00,000 --> 00:00:00,033
+<font size="36">FrameCnt : 1, DiffTime : 33ms
+2026-07-10 12:16:11,514,753
+[iso : 100] [shutter : 1/640.0] [fnum : 560] [ev : 0] [ct : 5502] [color_md : d_log] [focal_len : 280] [latitude : 63.406410] [longtitude : 21.211324] </font>
+
+2
+00:00:00,033 --> 00:00:00,066
+<font size="36">FrameCnt : 2, DiffTime : 33ms
+2026-07-10 12:16:11,548,119
+[iso : 100] [shutter : 1/640.0] [fnum : 560] [ev : 0] [ct : 5502] [color_md : d_log] [focal_len : 280] [latitude : 63.406410] [longtitude : 21.211324] </font>
+
+3
+00:00:00,066 --> 00:00:00,100
+<font size="36">FrameCnt : 3, DiffTime : 34ms
+2026-07-10 12:16:11,581,484
+[iso : 100] [shutter : 1/640.0] [fnum : 560] [ev : 0] [ct : 5502] [color_md : d_log] [focal_len : 280] [latitude : 63.406410] [longtitude : 21.211324] </font>
+
+4
+00:00:00,100 --> 00:00:00,133
+<font size="36">FrameCnt : 4, DiffTime : 33ms
+2026-07-10 12:16:11,614,848
+[iso : 100] [shutter : 1/640.0] [fnum : 560] [ev : 0] [ct : 5502] [color_md : d_log] [focal_len : 280] [latitude : 63.406410] [longtitude : 21.211324] </font>
+
+5
+00:00:00,133 --> 00:00:00,166
+<font size="36">FrameCnt : 5, DiffTime : 33ms
+2026-07-10 12:16:11,648,212
+[iso : 100] [shutter : 1/640.0] [fnum : 560] [ev : 0] [ct : 5502] [color_md : d_log] [focal_len : 280] [latitude : 63.406410] [longtitude : 21.211324] </font>
+
+668
+00:00:22,254 --> 00:00:22,287
+<font size="36">FrameCnt : 668, DiffTime : 33ms
+2026-07-10 12:16:33,768,922
+[iso : 100] [shutter : 1/500.0] [fnum : 560] [ev : 0] [ct : 5502] [color_md : d_log] [focal_len : 280] [latitude : 63.406431] [longtitude : 21.211329] </font>
+
+5001
+00:02:46,822 --> 00:02:46,856
+<font size="36">FrameCnt : 5001, DiffTime : 34ms
+2026-07-10 12:18:58,337,574
+[iso : 100] [shutter : 1/500.0] [fnum : 560] [ev : 0] [ct : 5502] [color_md : d_log] [focal_len : 280] [latitude : 63.406380] [longtitude : 21.211462] </font>
+
+5002
+00:02:46,856 --> 00:02:46,889
+<font size="36">FrameCnt : 5002, DiffTime : 33ms
+2026-07-10 12:18:58,370,938
+[iso : 100] [shutter : 1/500.0] [fnum : 560] [ev : 0] [ct : 5502] [color_md : d_log] [focal_len : 280] [latitude : 63.406381] [longtitude : 21.211460] </font>

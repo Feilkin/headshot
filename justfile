@@ -15,6 +15,12 @@ test:
 parity:
     cargo nextest run --workspace --run-ignored ignored-only -E 'test(parity)'
 
+# Capture-sample suite (doc/05): end-to-end video/SRT/RAW tests against
+# local DJI captures. Set HEADSHOT_SAMPLES_DIR to a directory of clips
+# (+ sidecar .srt). Never commits media — see .gitignore /samples/.
+samples:
+    cargo nextest run -p headshot-capture --run-ignored ignored-only -E 'test(samples)'
+
 # One-time Python env for the two tools below (torch is CPU-build; plenty).
 tools-venv:
     uv venv --python 3.12 tools/.venv

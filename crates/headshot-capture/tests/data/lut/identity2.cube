@@ -1,0 +1,13 @@
+# hand-written identity LUT (test fixture; not derived from any vendor LUT)
+TITLE "identity 2"
+LUT_3D_SIZE 2
+DOMAIN_MIN 0.0 0.0 0.0
+DOMAIN_MAX 1.0 1.0 1.0
+0 0 0
+1 0 0
+0 1 0
+1 1 0
+0 0 1
+1 0 1
+0 1 1
+1 1 1
