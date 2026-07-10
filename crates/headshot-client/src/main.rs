@@ -114,13 +114,6 @@ impl FrameGroup {
             FrameGroup::Odd => frame % 2 == 1,
         }
     }
-    fn label(self) -> &'static str {
-        match self {
-            FrameGroup::All => "all",
-            FrameGroup::Even => "even",
-            FrameGroup::Odd => "odd",
-        }
-    }
 }
 
 /// Route one session event into the point-cloud scene (shared by the CLI
@@ -140,9 +133,6 @@ pub fn apply_viewer_event(scene: &mut Scene, event: ViewerEvent) {
 
 #[derive(Component)]
 struct ChunkMesh;
-
-#[derive(Component)]
-struct StatusText;
 
 #[derive(Component)]
 struct Orbit {
@@ -240,10 +230,7 @@ fn main() {
         .insert_state(initial)
         .add_plugins(ui::CaptureUiPlugin)
         .add_systems(Startup, setup)
-        .add_systems(
-            Update,
-            (keyboard, rebuild_meshes, orbit_camera, draw_frusta, update_status),
-        )
+        .add_systems(Update, (keyboard, rebuild_meshes, orbit_camera, draw_frusta))
         .run();
 }
 
@@ -252,12 +239,6 @@ fn setup(mut commands: Commands) {
         Camera3d::default(),
         Transform::from_xyz(0.0, 0.0, -2.0).looking_at(Vec3::new(0.0, 0.0, 1.0), -Vec3::Y),
         Orbit { yaw: 0.0, pitch: 0.0, distance: 2.0, target: Vec3::new(0.0, 0.0, 1.0) },
-    ));
-    commands.spawn((
-        StatusText,
-        Text::new("ready"),
-        Node { position_type: PositionType::Absolute, left: Val::Px(8.0), top: Val::Px(8.0), ..default() },
-        GlobalZIndex(10),
     ));
 }
 
@@ -394,17 +375,3 @@ fn draw_frusta(scene: Res<Scene>, mut gizmos: Gizmos) {
     }
 }
 
-fn update_status(scene: Res<Scene>, mut query: Query<&mut Text, With<StatusText>>) {
-    let Ok(mut text) = query.single_mut() else { return };
-    let points: usize = scene.chunk_entities.len();
-    let total: usize = scene.chunks.iter().map(|c| c.positions.len()).sum();
-    text.0 = format!(
-        "{}\nchunks {} | {} pts | conf q={:.1} (≥{:.2}) | frames: {} | [ ] conf, G group, F frusta",
-        scene.status,
-        points,
-        total,
-        scene.conf_quantile,
-        scene.conf_threshold,
-        scene.frame_group.label(),
-    );
-}

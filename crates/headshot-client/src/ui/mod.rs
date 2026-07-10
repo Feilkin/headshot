@@ -3,8 +3,10 @@
 //! in [`worker`]; these modules are thin bevy state + feathers widgets.
 
 pub mod log;
+pub mod reconstruct;
 pub mod review;
 pub mod setup;
+pub mod theme;
 pub mod worker;
 
 use std::path::PathBuf;
@@ -50,11 +52,13 @@ impl Plugin for CaptureUiPlugin {
         app.init_state::<Screen>()
             .init_resource::<PlanRes>()
             .init_resource::<setup::SetupState>()
+            .init_resource::<log::StatusLog>()
+            .add_systems(Startup, theme::load_fonts)
             .add_systems(Update, pump_worker_events)
             .add_plugins((
                 setup::SetupScreenPlugin,
                 review::ReviewScreenPlugin,
-                log::LogPanePlugin,
+                reconstruct::ReconstructScreenPlugin,
             ));
     }
 }
@@ -80,22 +84,22 @@ fn pump_worker_events(
         match event {
             Event::Progress(m) => scene.status = m,
             Event::Discovered { videos, photos } => {
-                scene.status = format!(
+                status_log.push(format!(
                     "found {} videos, {} photos — untick anything to skip, then scan",
                     videos.len(),
                     photos.len()
-                );
+                ));
                 setup_state.discovered = Some((videos, photos));
             }
             Event::Scanned(p) => {
                 setup_state.scanning = false;
-                scene.status = format!("{} frames selected", p.selected.len());
+                status_log.push(format!("{} frames selected", p.selected.len()));
                 plan.0 = Some(p);
                 next.set(Screen::Review);
             }
             Event::ScanFailed(m) => {
                 setup_state.scanning = false;
-                scene.status = format!("scan failed: {m}");
+                status_log.push(format!("scan failed: {m}"));
             }
             Event::PlanReturned(p) => {
                 // keep it around so a future "back to review" can re-edit
